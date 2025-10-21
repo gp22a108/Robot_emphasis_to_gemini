@@ -8,7 +8,7 @@ from socketserver import ThreadingMixIn
 
 # --- グローバル変数 ---
 pose_data = {
-    "CSotaMotion.SV_R_SHOULDER": 900,
+    "CSotaMotion.SV_R_SHOULDER": 0,
     "CSotaMotion.SV_R_ELBOW": 0,
     "CSotaMotion.SV_L_SHOULDER": 0,
     "CSotaMotion.SV_L_ELBOW": 0,
