@@ -21,7 +21,7 @@ def generate_audio(session: requests.Session, text: str, speaker: int) -> bytes:
     query_response.raise_for_status()
 
     audio_query = query_response.json()
-    audio_query['speedScale'] = 1.4
+    audio_query['speedScale'] = 1.3 #再生速度
 
     synth_response = session.post(f"{BASE_URL}/synthesis", params={"speaker": speaker}, json=audio_query, timeout=synthesis_timeout)
     synth_response.raise_for_status()
