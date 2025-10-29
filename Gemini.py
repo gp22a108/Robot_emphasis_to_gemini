@@ -91,8 +91,10 @@ pya = pyaudio.PyAudio()
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE):
         self.video_mode = video_mode
-        self.system_instruction = """基本的に日本語で回答してください。"""  # Hardcoded system instruction
-
+        self.system_instruction = """基本的に日本語で回答してください。
+        もしユーザーから写真撮影を依頼された場合（例：「写真撮って」「撮影して」）、
+        あなたの応答文の最後に必ず `[CAPTURE_IMAGE]` という文字列を含めてください。
+        例：「はい、チーズ！ [CAPTURE_IMAGE]」"""
         self.out_queue = None
         self.session = None
         self.send_text_task = None
@@ -209,34 +211,39 @@ class AudioLoop:
     async def receive_responses(self):
         """Background task that reads from the websocket and prints responses."""
         while True:
-            # 応答の断片を格納するためのリストを初期化
             response_chunks = []
             turn = self.session.receive()
             async for response in turn:
                 if text := response.text:
-                    # リアルタイムで表示しつつ、リストに断片を追加
+                    # Print in real-time and add fragments to the list
                     print(text, end="")
                     response_chunks.append(text)
 
-            # 1ターンの応答が完了したら改行
+            # New line when one turn of response is complete
             print()
 
-            # リストに格納したすべての断片を結合して、一つの文字列にする
+            # Join all the fragments stored in the list into a single string
             gemini_output = "".join(response_chunks)
 
-            # これで `gemini_output` 変数に完全な応答が格納されました。
-            # 例えば、ログに保存したり、内容を解析したりできます。
             if gemini_output:
-                # 確認のために、キャプチャした全文を表示する例
+                # For confirmation, an example of displaying the full text captured
                 print(f"\n--- [Full Response Captured] ---\n{gemini_output}\n--------------------------------\n")
 
                 self.mic_is_active.clear()
                 print("--- Mic paused while speaking ---")
 
-                # Take a picture in the background after 5 seconds
-                asyncio.create_task(asyncio.to_thread(take_picture, self.current_frame, 5))
+                text_to_play = gemini_output
+                # Check for capture trigger
+                if "[CAPTURE_IMAGE]" in gemini_output:
+                    print("!!! 撮影トリガーを検出しました !!!")
+                    # Remove the trigger string from the text to be spoken to the user
+                    text_to_play = gemini_output.replace("[CAPTURE_IMAGE]", "").strip()
 
-                # Define and send pose data in the format expected by Http_realtime.py
+                    # Execute photo capture task
+                    print("--- 写真撮影タスクを開始します ---")
+                    asyncio.create_task(asyncio.to_thread(take_picture, self.current_frame, 5))
+
+                # --- Robot motion ---
                 if self.value % 2 == 0:
                     pose_data_to_send = {
                         "CSotaMotion.SV_R_SHOULDER": 800,
@@ -248,7 +255,7 @@ class AudioLoop:
                         "CSotaMotion.SV_BODY_Y": 0,
                         "CSotaMotion.SV_HEAD_P": 0,
                     }
-                    self.value = self.value + 1
+                    self.value += 1
                 else:
                     pose_data_to_send = {
                         "CSotaMotion.SV_R_SHOULDER": -900,
@@ -260,10 +267,12 @@ class AudioLoop:
                         "CSotaMotion.SV_BODY_Y": 0,
                         "CSotaMotion.SV_HEAD_P": 0,
                     }
-                    self.value = self.value + 1
+                    self.value += 1
                 await self.robot_operation(pose_data_to_send)
 
-                await asyncio.to_thread(play_text, gemini_output)
+                # Play the text with the trigger string removed
+                if text_to_play:  # Check that it is not an empty string
+                    await asyncio.to_thread(play_text, text_to_play)
 
                 self.mic_is_active.set()
                 print("--- Mic resumed ---")
