@@ -5,7 +5,7 @@ import pyaudio
 import requests
 
 # --- 定数 ---
-BASE_URL = "http://localhost:50021"
+BASE_URL = "http://127.0.0.1:50021"
 REQUEST_TIMEOUT = 10
 CHANNELS = 1
 SAMPWIDTH = 2
@@ -67,7 +67,7 @@ def play_text(text: str, speaker: int = 1):
         player_thread = threading.Thread(target=player_worker, args=(stream, audio_queue), daemon=True)
         player_thread.start()
 
-        with requests.Session() as session, ThreadPoolExecutor(max_workers=2) as executor:
+        with requests.Session() as session, ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(generate_audio, session, chunk, speaker) for chunk in chunks]
             for i, future in enumerate(futures):
                 wav_data = future.result()

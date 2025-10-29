@@ -61,6 +61,7 @@ import mss
 
 import argparse
 from Voicevox_player import play_text
+from Capture import take_picture
 
 from google import genai
 
@@ -95,6 +96,7 @@ class AudioLoop:
         self.out_queue = None
         self.session = None
         self.send_text_task = None
+        self.current_frame = None
 
         self.mic_is_active = asyncio.Event()
         self.mic_is_active.set()
@@ -113,6 +115,7 @@ class AudioLoop:
     def _get_frame(self, cap):
         # Read the frameq
         ret, frame = cap.read()
+        self.current_frame = frame
         # Check if the frame was read successfully
         if not ret:
             return None
@@ -229,6 +232,9 @@ class AudioLoop:
 
                 self.mic_is_active.clear()
                 print("--- Mic paused while speaking ---")
+
+                # Take a picture in the background after 5 seconds
+                asyncio.create_task(asyncio.to_thread(take_picture, self.current_frame, 5))
 
                 # Define and send pose data in the format expected by Http_realtime.py
                 if self.value % 2 == 0:
