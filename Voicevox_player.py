@@ -21,7 +21,7 @@ def generate_audio(session: requests.Session, text: str, speaker: int) -> bytes:
     query_response.raise_for_status()
 
     audio_query = query_response.json()
-    audio_query['speedScale'] = 1.3 #再生速度
+    audio_query['speedScale'] = 1.2 #再生速度
 
     synth_response = session.post(f"{BASE_URL}/synthesis", params={"speaker": speaker}, json=audio_query, timeout=synthesis_timeout)
     synth_response.raise_for_status()
@@ -54,7 +54,7 @@ def _create_chunks(text: str) -> List[str]:
         chunks.extend(s.strip() for s in re.split(r'(?<=[。！？\n])', remaining) if s.strip())
     return chunks
 
-def play_text(text: str, speaker: int = 1):
+def play_text(text: str, speaker: int =36):
     """音声の生成と再生を並列処理する"""
     chunks = _create_chunks(text)
     if not chunks:
@@ -70,7 +70,7 @@ def play_text(text: str, speaker: int = 1):
         player_thread = threading.Thread(target=player_worker, args=(stream, audio_queue), daemon=True)
         player_thread.start()
 
-        with requests.Session() as session, ThreadPoolExecutor(max_workers=3) as executor:
+        with requests.Session() as session, ThreadPoolExecutor(max_workers = 2) as executor:
             futures = [executor.submit(generate_audio, session, chunk, speaker) for chunk in chunks]
             for i, future in enumerate(futures):
                 wav_data = future.result()

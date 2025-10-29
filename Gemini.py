@@ -91,7 +91,7 @@ pya = pyaudio.PyAudio()
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE):
         self.video_mode = video_mode
-        self.system_instruction = """基本的に日本語で回答してください。
+        self.system_instruction = """基本的に日本語で回答してください。少し馴れ馴れしく
         もしユーザーから写真撮影を依頼された場合（例：「写真撮って」「撮影して」）、
         あなたの応答文の最後に必ず `[CAPTURE_IMAGE]` という文字列を含めてください。
         例：「はい、チーズ！ [CAPTURE_IMAGE]」"""
