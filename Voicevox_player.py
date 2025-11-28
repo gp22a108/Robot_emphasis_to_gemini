@@ -5,6 +5,7 @@ import threading
 import requests
 import sounddevice as sd
 from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
 
 # --- 定数 ---
 BASE_URL = "http://127.0.0.1:50121"
@@ -111,7 +112,7 @@ def playback_worker(audio_queue: queue.Queue):
             stream.stop()
             stream.close()
 
-def play_text(text: str, speaker: int = 10002):
+def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callable[[], None]] = None):
     """音声生成と再生のメインコントローラ"""
     chunks = _create_chunks(text)
     if not chunks: return
@@ -130,11 +131,17 @@ def play_text(text: str, speaker: int = 10002):
         for chunk in chunks:
             futures.append(executor.submit(generate_audio_chunk, session, chunk, speaker))
 
+        num_chunks = len(chunks)
         for i, future in enumerate(futures):
             wav_data = future.result()
             if wav_data:
+                # Check if this is the last chunk
+                if i == num_chunks - 1 and on_last_chunk_start:
+                    print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
+                    on_last_chunk_start()
+
                 # 生成できたデータをキューに入れる
-                sys.stdout.write(f"\r再生準備完了 ({i + 1}/{len(chunks)})")
+                sys.stdout.write(f"\r再生準備完了 ({i + 1}/{num_chunks})")
                 sys.stdout.flush()
                 audio_queue.put(wav_data)
 
@@ -149,7 +156,11 @@ def main():
     try:
         text_to_play = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else \
             "これはsounddeviceを使った修正版のコードです。最初の無音が解消され、スムーズに再生されます。"
-        play_text(text_to_play, speaker=1)
+        
+        def example_callback():
+            print("\n*** ラストチャンクの再生が始まりました！ ***")
+
+        play_text(text_to_play, speaker=1, on_last_chunk_start=example_callback)
     except KeyboardInterrupt:
         print("\n再生を中断しました。")
 

@@ -111,6 +111,7 @@ class AudioLoop:
         self.session = None
         self.send_text_task = None
         self.current_frame = None
+        self.loop = None
 
         self.mic_is_active = asyncio.Event()
         self.mic_is_active.set()
@@ -245,15 +246,21 @@ class AudioLoop:
                 print("--- Mic paused while speaking ---")
 
                 text_to_play = gemini_output
+                capture_callback = None
+
                 # Check for capture trigger
                 if "[CAPTURE_IMAGE]" in gemini_output:
                     print("!!! 撮影トリガーを検出しました !!!")
                     # Remove the trigger string from the text to be spoken to the user
                     text_to_play = gemini_output.replace("[CAPTURE_IMAGE]", "").strip()
 
-                    # Execute photo capture task
-                    print("--- 写真撮影タスクを開始します ---")
-                    asyncio.create_task(asyncio.to_thread(take_picture, self.current_frame, 5))
+                    # Define the callback to be triggered when the last chunk starts playing
+                    def capture_action():
+                        print("--- 写真撮影タスクを非同期で開始します ---")
+                        coro = asyncio.to_thread(take_picture, self.current_frame, 1)
+                        asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+                    capture_callback = capture_action
 
                 # --- Robot motion ---
                 if self.value % 2 == 0:
@@ -282,14 +289,15 @@ class AudioLoop:
                     self.value += 1
                 await self.robot_operation(pose_data_to_send)
 
-                # Play the text with the trigger string removed
+                # Play the text, passing the capture callback if it exists
                 if text_to_play:  # Check that it is not an empty string
-                    await asyncio.to_thread(play_text, text_to_play)
+                    await asyncio.to_thread(play_text, text_to_play, speaker=10002, on_last_chunk_start=capture_callback)
 
                 self.mic_is_active.set()
                 print("--- Mic resumed ---")
 
     async def run(self):
+        self.loop = asyncio.get_running_loop()
         try:
             config = CONFIG.copy()
             config["system_instruction"] = self.system_instruction
@@ -317,7 +325,8 @@ class AudioLoop:
         except asyncio.CancelledError:
             pass
         except ExceptionGroup as EG:
-            self.audio_stream.close()
+            if self.audio_stream:
+                self.audio_stream.close()
             traceback.print_exception(EG)
 
     async def robot_operation(self, pose_data):
