@@ -5,7 +5,7 @@ import pyaudio
 import requests
 
 # --- 定数 ---
-BASE_URL = "http://127.0.0.1:50021"
+BASE_URL = "http://127.0.0.1:50121"
 REQUEST_TIMEOUT = 10
 CHANNELS = 1
 SAMPWIDTH = 2
@@ -29,6 +29,8 @@ def generate_audio(session: requests.Session, text: str, speaker: int) -> bytes:
 
 def player_worker(stream: pyaudio.Stream, audio_queue: queue.Queue):
     """キューから音声データを取り出し再生するスレッド"""
+    # ストリームをウォームアップするために短い無音を再生
+    stream.write(b'\x00' * 1024 * SAMPWIDTH * CHANNELS)
     while True:
         wav_data = audio_queue.get()
         if wav_data is None:
@@ -54,7 +56,7 @@ def _create_chunks(text: str) -> List[str]:
         chunks.extend(s.strip() for s in re.split(r'(?<=[。！？\n])', remaining) if s.strip())
     return chunks
 
-def play_text(text: str, speaker: int =36):
+def play_text(text: str, speaker: int =10002):
     """音声の生成と再生を並列処理する"""
     chunks = _create_chunks(text)
     if not chunks:
@@ -64,7 +66,11 @@ def play_text(text: str, speaker: int =36):
     p, stream = None, None
     try:
         p = pyaudio.PyAudio()
-        stream = p.open(format=p.get_format_from_width(SAMPWIDTH), channels=CHANNELS, rate=FRAMERATE, output=True)
+        stream = p.open(format=p.get_format_from_width(SAMPWIDTH),
+                        channels=CHANNELS,
+                        rate=FRAMERATE,
+                        output=True,
+                        frames_per_buffer=1024)
 
         audio_queue = queue.Queue()
         player_thread = threading.Thread(target=player_worker, args=(stream, audio_queue), daemon=True)
@@ -86,8 +92,11 @@ def play_text(text: str, speaker: int =36):
     except Exception as e:
         print(f"\n予期せぬエラーが発生しました: {e}")
     finally:
-        if stream: stream.close()
-        if p: p.terminate()
+        if stream:
+            stream.stop_stream()
+            stream.close()
+        if p:
+            p.terminate()
         print("処理を終了します。")
 
 def main():
