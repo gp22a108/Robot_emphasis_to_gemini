@@ -48,10 +48,8 @@ python Get_started_LiveAPI.py --mode screen
 import asyncio
 import base64
 import io
-import os
 import sys
 import traceback
-import json
 import aiohttp
 
 import cv2
@@ -257,7 +255,7 @@ class AudioLoop:
                     # Define the callback to be triggered when the last chunk starts playing
                     def capture_action():
                         print("--- 写真撮影タスクを非同期で開始します ---")
-                        coro = asyncio.to_thread(take_picture, self.current_frame, 1)
+                        coro = asyncio.to_thread(take_picture, self.current_frame, 0)
                         asyncio.run_coroutine_threadsafe(coro, self.loop)
 
                     capture_callback = capture_action
