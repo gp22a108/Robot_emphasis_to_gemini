@@ -123,13 +123,19 @@ class AudioLoop:
         if self.session and self.loop:
             # メインのイベントループでコルーチンを安全に実行
             asyncio.run_coroutine_threadsafe(
-                self.session.send_client_content(input="Detected", end_of_turn=True),
+                self.session.send(input="Detected", end_of_turn=True),
                 self.loop
             )
 
     async def send_text(self):
-        # This task is now a no-op, we just wait indefinitely.
-        await asyncio.Event().wait()
+        while True:
+            text = await asyncio.to_thread(
+                input,
+                "message > ",
+            )
+            if text.lower() == "q":
+                break
+            await self.session.send(input=text or ".", end_of_turn=True)
 
     def _get_frame(self, cap):
         # Read the frameq
@@ -203,7 +209,7 @@ class AudioLoop:
     async def send_realtime(self):
         while True:
             msg = await self.out_queue.get()
-            await self.session.send_realtime_input(input=msg)
+            await self.session.send(input=msg)
 
     async def listen_audio(self):
         mic_info = pya.get_default_input_device_info()

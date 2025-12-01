@@ -69,8 +69,6 @@ class YOLODetector:
         self.running = False
         if self.thread and self.thread.is_alive():
             self.thread.join()
-        self.cap.release()
-        cv2.destroyAllWindows()
         print("YOLO detector stopped.")
 
     def _run_loop(self):
@@ -80,19 +78,25 @@ class YOLODetector:
 
         PERSON_HEIGHT_THRESHOLD = 360
 
-        while self.running:
-            success, frame = self.cap.read()
-            if not success:
-                break
+        try:
+            while self.running:
+                success, frame = self.cap.read()
+                if not success:
+                    break
 
-            input_tensor = self._preprocess_frame(frame)
-            detections = self._run_inference(input_tensor)
-            self._postprocess_and_draw(frame, detections, PERSON_HEIGHT_THRESHOLD)
+                input_tensor = self._preprocess_frame(frame)
+                detections = self._run_inference(input_tensor)
+                self._postprocess_and_draw(frame, detections, PERSON_HEIGHT_THRESHOLD)
 
-            cv2.imshow("YOLOv12 - Intel GPU Native", frame)
+                cv2.imshow("YOLOv12 - Intel GPU Native", frame)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.running = False # 'q'キーでループを抜ける
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.running = False # 'q'キーでループを抜ける
+        finally:
+            self.cap.release()
+            cv2.destroyAllWindows()
+            self.running = False # Ensure flag is set
+            print("YOLO detector loop finished.")
 
     def _preprocess_frame(self, frame):
         input_img = cv2.resize(frame, (640, 640))
