@@ -18,7 +18,7 @@
 
 To install the dependencies for this script, run:
 
-``` 
+```
 pip install google-genai opencv-python pyaudio pillow mss aiohttp
 ```
 
@@ -27,7 +27,7 @@ variable is set to the api-key you obtained from Google AI Studio.
 
 Important: **Use headphones**. This script uses the system default audio
 input and output, which often won't include echo cancellation. So to prevent
-the model from interrupting itself it is important that you use headphones. 
+the model from interrupting itself it is important that you use headphones.
 
 ## Run
 
@@ -60,6 +60,7 @@ import mss
 import argparse
 from Voicevox_player import play_text
 from Capture import take_picture
+from YOLO import YOLODetector # YOLO.pyからYOLODetectorをインポート
 
 from google import genai
 
@@ -110,10 +111,21 @@ class AudioLoop:
         self.send_text_task = None
         self.current_frame = None
         self.loop = None
+        self.yolo_detector = None
 
         self.mic_is_active = asyncio.Event()
         self.mic_is_active.set()
         self.value = 0
+
+    def _handle_yolo_detection(self):
+        """YOLOからの検出イベントを処理するコールバック"""
+        print("YOLO detection event received, sending to Gemini.")
+        if self.session and self.loop:
+            # メインのイベントループでコルーチンを安全に実行
+            asyncio.run_coroutine_threadsafe(
+                self.session.send(input="Detected", end_of_turn=True),
+                self.loop
+            )
 
     async def send_text(self):
         while True:
@@ -151,7 +163,7 @@ class AudioLoop:
         # This takes about a second, and will block the whole program
         # causing the audio pipeline to overflow if you don't to_thread it.
         cap = await asyncio.to_thread(
-            cv2.VideoCapture, 0
+            cv2.VideoCapture, 1
         )  # 0 represents the default camera
 
         while True:
@@ -297,6 +309,10 @@ class AudioLoop:
     async def run(self):
         self.loop = asyncio.get_running_loop()
         try:
+            # YOLO検出器を初期化して開始
+            self.yolo_detector = YOLODetector(on_detection=self._handle_yolo_detection)
+            self.yolo_detector.start()
+
             config = CONFIG.copy()
             config["system_instruction"] = self.system_instruction
             async with (
@@ -326,6 +342,10 @@ class AudioLoop:
             if self.audio_stream:
                 self.audio_stream.close()
             traceback.print_exception(EG)
+        finally:
+            if self.yolo_detector:
+                self.yolo_detector.stop()
+
 
     async def robot_operation(self, pose_data):
         try:
