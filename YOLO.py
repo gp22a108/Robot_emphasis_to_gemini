@@ -67,7 +67,7 @@ class YOLODetector:
     def stop(self):
         """検出ループを停止します。"""
         self.running = False
-        if self.thread:
+        if self.thread and self.thread.is_alive():
             self.thread.join()
         self.cap.release()
         cv2.destroyAllWindows()
@@ -93,8 +93,6 @@ class YOLODetector:
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.running = False # 'q'キーでループを抜ける
-
-        self.stop()
 
     def _preprocess_frame(self, frame):
         input_img = cv2.resize(frame, (640, 640))

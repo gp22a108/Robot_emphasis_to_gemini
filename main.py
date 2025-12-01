@@ -39,7 +39,7 @@ if __name__ == "__main__":
         if not os.path.exists(gemini_path):
             raise FileNotFoundError(f"Gemini.py not found at {gemini_path}")
         # We will modify Gemini.py to watch for a file instead of a threshold argument
-        p = subprocess.Popen([python_executable, gemini_path])
+        p = subprocess.Popen([python_executable, gemini_path], stdin=subprocess.DEVNULL)
         processes.append(p)
         print("Gemini.py is running in the background.")
     except Exception as e:
