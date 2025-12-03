@@ -46,7 +46,7 @@ class YOLODetector:
         # ---------------------------------------------------------
         # 2. カメラ設定
         # ---------------------------------------------------------
-        self.cap = cv2.VideoCapture(0)  //使用するカメラID
+        self.cap = cv2.VideoCapture(0)  #使用するカメラID
         if not self.cap.isOpened():
             print("カメラが開けませんでした。")
             raise IOError("Cannot open camera")

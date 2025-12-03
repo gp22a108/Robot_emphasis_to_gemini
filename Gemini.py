@@ -175,7 +175,7 @@ class AudioLoop:
         # This takes about a second, and will block the whole program
         # causing the audio pipeline to overflow if you don't to_thread it.
         cap = await asyncio.to_thread(
-            cv2.VideoCapture, 1
+            cv2.VideoCapture, 0 #使用するカメラID
         )  # 0 represents the default camera
 
         while True:
