@@ -63,7 +63,6 @@ from Capture import take_picture
 from YOLO import YOLODetector # YOLO.pyからYOLODetectorをインポート
 
 from google import genai
-
 if sys.version_info < (3, 11, 0):
     import taskgroup, exceptiongroup
 
@@ -87,15 +86,28 @@ CONFIG = {"response_modalities": ["TEXT"]}
 
 pya = pyaudio.PyAudio()
 
+def list_audio_devices():
+    print("Available audio input devices:")
+    for i in range(pya.get_device_count()):
+        dev = pya.get_device_info_by_index(i)
+        if dev['maxInputChannels'] > 0:
+            print(f"  Index {i}: {dev['name']}")
+    print("-" * 20)
+    default_dev = pya.get_default_input_device_info()
+    print(f"Default audio input device: Index {default_dev['index']}: {default_dev['name']}")
+    print("-" * 20)
+
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE):
         self.video_mode = video_mode
         self.system_instruction = """### 役割と振る舞い
         - ユーザーに対しては、友達のように親しみやすく、少し馴れ馴れしい口調（タメ口など）で接してください。
         - 基本的にすべて日本語で回答してください。
-        - まず初めにカメラを見てユーザーの服装や身につけているものを見て褒めてください。「その服装良いね～、今日は授業？」
+        - まず初めにカメラを見てユーザーの服装や身につけているものを見て褒めてください。
         - 最後に写真を取るように誘導してください。
-        - 適切なタイミングで写真撮影してください。
+        - だいたい会話が３往復目くらいで写真撮影してください。
+        - 質問の後は会話を無理やり続けないでください。
+        - 少し一つの会話の長さ控えめで
         
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
@@ -301,7 +313,7 @@ class AudioLoop:
 
                 # Play the text, passing the capture callback if it exists
                 if text_to_play:  # Check that it is not an empty string
-                    await asyncio.to_thread(play_text, text_to_play, speaker=10002, on_last_chunk_start=capture_callback)
+                    await asyncio.to_thread(play_text, text_to_play, speaker=3, on_last_chunk_start=capture_callback)
 
                 self.mic_is_active.set()
                 print("--- Mic resumed ---")

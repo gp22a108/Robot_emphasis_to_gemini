@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 # --- 定数 ---
-BASE_URL = "http://127.0.0.1:50121"
+BASE_URL = "http://127.0.0.1:50021"
 REQUEST_TIMEOUT = 10
 SAMPLE_RATE = 24000
 CHANNELS = 1
