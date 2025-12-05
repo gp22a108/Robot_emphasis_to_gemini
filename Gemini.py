@@ -61,6 +61,7 @@ import argparse
 from Voicevox_player import play_text
 from Capture import take_picture
 from YOLO import YOLOOptimizer # YOLO.pyからYOLOOptimizerをインポート
+import config  # 設定ファイルをインポート
 
 from google import genai
 if sys.version_info < (3, 11, 0):
@@ -275,7 +276,7 @@ class AudioLoop:
 
                 # Play the text, passing the capture callback if it exists
                 if text_to_play:  # Check that it is not an empty string
-                    await asyncio.to_thread(play_text, text_to_play, speaker=3, on_last_chunk_start=capture_callback)
+                    await asyncio.to_thread(play_text, text_to_play, speaker=config.SPEAKER_ID, on_last_chunk_start=capture_callback)
 
                 self.mic_is_active.set()
                 print("--- Mic resumed ---")
