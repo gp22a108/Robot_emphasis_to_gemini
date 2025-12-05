@@ -22,16 +22,16 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Failed to start Http_realtime.py: {e}")
 
-    # Start YOLO.py
-    try:
-        yolo_path = os.path.join(script_dir, "YOLO.py")
-        if not os.path.exists(yolo_path):
-            raise FileNotFoundError(f"YOLO.py not found at {yolo_path}")
-        p = subprocess.Popen([python_executable, yolo_path])
-        processes.append(p)
-        print("YOLO.py is running in the background.")
-    except Exception as e:
-        print(f"Failed to start YOLO.py: {e}")
+    # # Start YOLO.py
+    # try:
+    #     yolo_path = os.path.join(script_dir, "YOLO.py")
+    #     if not os.path.exists(yolo_path):
+    #         raise FileNotFoundError(f"YOLO.py not found at {yolo_path}")
+    #     p = subprocess.Popen([python_executable, yolo_path])
+    #     processes.append(p)
+    #     print("YOLO.py is running in the background.")
+    # except Exception as e:
+    #     print(f"Failed to start YOLO.py: {e}")
 
     # Start Gemini.py
     try:
@@ -44,6 +44,17 @@ if __name__ == "__main__":
         print("Gemini.py is running in the background.")
     except Exception as e:
         print(f"Failed to start Gemini.py: {e}")
+
+    # Start PyView.py
+    try:
+        pyview_path = os.path.join(script_dir, "PyView.py")
+        if not os.path.exists(pyview_path):
+            raise FileNotFoundError(f"PyView.py not found at {pyview_path}")
+        p = subprocess.Popen([python_executable, pyview_path])
+        processes.append(p)
+        print("PyView.py is running in the background.")
+    except Exception as e:
+        print(f"Failed to start PyView.py: {e}")
 
     print("\nAll processes started. Monitoring for termination...")
 

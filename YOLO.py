@@ -39,7 +39,7 @@ CLASSES = {
 }
 
 class YOLOOptimizer:
-    def __init__(self, model_path, device_name, cache_dir, input_size, on_detection=None):
+    def __init__(self, model_path=MODEL_PATH, device_name=DEVICE_NAME, cache_dir=CACHE_DIR, input_size=MODEL_INPUT_SIZE, on_detection=None):
         """
         YOLO検出エンジンの初期化
         """
@@ -51,6 +51,10 @@ class YOLOOptimizer:
         self.frame_count = 0
         self.last_time = time.time()
         self.inference_time_ms = 0.0
+        self.thread = None
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.current_frame_for_capture = None
 
         # 結果受け渡し用キュー (最大サイズを小さくして遅延を防ぐ)
         self.result_queue = queue.Queue(maxsize=2)
@@ -281,11 +285,17 @@ class YOLOOptimizer:
         print("  - 'q' キー: 終了")
 
         try:
-            while True:
+            while not self.stop_event.is_set():
+                if self.pause_event.is_set():
+                    time.sleep(0.1)
+                    continue
+
                 ret, frame = cap.read()
                 if not ret:
                     print("[情報] 映像ストリーム終了")
                     break
+                
+                self.current_frame_for_capture = frame.copy()
 
                 h, w = frame.shape[:2]
                 h_scale = h / self.input_height
@@ -326,6 +336,42 @@ class YOLOOptimizer:
             cv2.destroyAllWindows()
             print("[完了] 終了しました")
 
+    def get_current_frame(self):
+        """現在のフレームを返します。"""
+        return self.current_frame_for_capture
+
+    def pause(self):
+        """スレッドを一時停止します。"""
+        if not self.pause_event.is_set():
+            print("[YOLO] 一時停止します。")
+            self.pause_event.set()
+
+    def resume(self):
+        """スレッドを再開します。"""
+        if self.pause_event.is_set():
+            print("[YOLO] 再開します。")
+            self.pause_event.clear()
+
+    def start(self):
+        """スレッドを開始します。"""
+        if self.thread is None:
+            self.stop_event.clear()
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+            print("[YOLO] スレッドを開始しました。")
+
+    def stop(self):
+        """スレッドを停止します。"""
+        if self.thread and self.thread.is_alive():
+            print("[YOLO] 停止シグナルを送信します...")
+            self.stop_event.set()
+            self.thread.join(timeout=5) # タイムアウトを5秒に設定
+            if self.thread.is_alive():
+                print("[YOLO] スレッドの停止に失敗しました。")
+            else:
+                print("[YOLO] スレッドが正常に停止しました。")
+        self.thread = None
+
 def simple_callback():
     pass
 
@@ -342,10 +388,16 @@ def main():
             input_size=MODEL_INPUT_SIZE,
             on_detection=simple_callback
         )
-        optimizer.run()
+        optimizer.start()
+        # メインスレッドはここで待機するか、他の処理を行う
+        # このサンプルでは、Enterキーが押されるまで待機
+        input("Enterキーを押すと終了します...\n")
     except Exception as e:
         print(f"[致命的エラー]:\n{e}")
         traceback.print_exc()
+    finally:
+        if 'optimizer' in locals() and optimizer:
+            optimizer.stop()
 
 if __name__ == "__main__":
     main()

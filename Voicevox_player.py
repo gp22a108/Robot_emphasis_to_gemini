@@ -2,6 +2,7 @@ import sys
 import re
 import queue
 import threading
+import time
 import requests
 import sounddevice as sd
 from concurrent.futures import ThreadPoolExecutor
@@ -77,11 +78,16 @@ def playback_worker(audio_queue: queue.Queue):
         if first_chunk is None:
             return # データがないまま終了
 
+        # 5秒待機
+        print("\n--- 5秒待機します ---")
+        time.sleep(3)
+
         # 2. 最初のデータを受け取った瞬間にストリームを開く
         # RawOutputStreamを使用し、ヘッダーを除去したPCMデータを直接流し込む
+        # デフォルトのバッファリング（latency='high'相当）に戻す
         stream = sd.RawOutputStream(
             samplerate=SAMPLE_RATE,
-            blocksize=1024,
+            blocksize=10240,
             channels=CHANNELS,
             dtype='int16'
         )
@@ -126,7 +132,7 @@ def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callabl
 
     # 生成（プロデューサー）処理
     # 最初のチャンクを最優先で取得するため、並列数は調整しても良い
-    with requests.Session() as session, ThreadPoolExecutor(max_workers=2) as executor:
+    with requests.Session() as session, ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for chunk in chunks:
             futures.append(executor.submit(generate_audio_chunk, session, chunk, speaker))
@@ -156,7 +162,7 @@ def main():
     try:
         text_to_play = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else \
             "これはsounddeviceを使った修正版のコードです。最初の無音が解消され、スムーズに再生されます。"
-        
+
         def example_callback():
             print("\n*** ラストチャンクの再生が始まりました！ ***")
 

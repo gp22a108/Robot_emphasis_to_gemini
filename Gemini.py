@@ -60,7 +60,7 @@ import mss
 import argparse
 from Voicevox_player import play_text
 from Capture import take_picture
-from YOLO import YOLODetector # YOLO.pyからYOLODetectorをインポート
+from YOLO import YOLOOptimizer # YOLO.pyからYOLOOptimizerをインポート
 
 from google import genai
 if sys.version_info < (3, 11, 0):
@@ -108,6 +108,7 @@ class AudioLoop:
         - だいたい会話が３往復目くらいで写真撮影してください。
         - 質問の後は会話を無理やり続けないでください。
         - 少し一つの会話の長さ控えめで
+        - 写真撮影の同意を取ってください。
         
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
@@ -121,7 +122,6 @@ class AudioLoop:
         self.out_queue = None
         self.session = None
         self.send_text_task = None
-        self.current_frame = None
         self.loop = None
         self.yolo_detector = None
 
@@ -148,47 +148,6 @@ class AudioLoop:
             if text.lower() == "q":
                 break
             await self.session.send(input=text or ".", end_of_turn=True)
-
-    def _get_frame(self, cap):
-        # Read the frameq
-        ret, frame = cap.read()
-        self.current_frame = frame
-        # Check if the frame was read successfully
-        if not ret:
-            return None
-        # Fix: Convert BGR to RGB color space
-        # OpenCV captures in BGR but PIL expects RGB format
-        # This prevents the blue tint in the video feed
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = PIL.Image.fromarray(frame_rgb)  # Now using RGB frame
-        img.thumbnail([1024, 1024])
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        mime_type = "image/jpeg"
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
-
-    async def get_frames(self):
-        # This takes about a second, and will block the whole program
-        # causing the audio pipeline to overflow if you don't to_thread it.
-        cap = await asyncio.to_thread(
-            cv2.VideoCapture, 0 #使用するカメラID
-        )  # 0 represents the default camera
-
-        while True:
-            frame = await asyncio.to_thread(self._get_frame, cap)
-            if frame is None:
-                break
-
-            await asyncio.sleep(1.0)
-
-            await self.out_queue.put(frame)
-
-        # Release the VideoCapture object
-        cap.release()
 
     def _get_screen(self):
         sct = mss.mss()
@@ -266,6 +225,8 @@ class AudioLoop:
 
                 self.mic_is_active.clear()
                 print("--- Mic paused while speaking ---")
+                if self.yolo_detector:
+                    self.yolo_detector.pause()
 
                 text_to_play = gemini_output
                 capture_callback = None
@@ -279,7 +240,8 @@ class AudioLoop:
                     # Define the callback to be triggered when the last chunk starts playing
                     def capture_action():
                         print("--- 写真撮影タスクを非同期で開始します ---")
-                        coro = asyncio.to_thread(take_picture, self.current_frame, 0)
+                        frame_to_capture = self.yolo_detector.get_current_frame()
+                        coro = asyncio.to_thread(take_picture, frame_to_capture, 0)
                         asyncio.run_coroutine_threadsafe(coro, self.loop)
 
                     capture_callback = capture_action
@@ -318,11 +280,14 @@ class AudioLoop:
                 self.mic_is_active.set()
                 print("--- Mic resumed ---")
 
+                if self.yolo_detector:
+                    self.yolo_detector.resume()
+
     async def run(self):
         self.loop = asyncio.get_running_loop()
         try:
             # YOLO検出器を初期化して開始
-            self.yolo_detector = YOLODetector(on_detection=self._handle_yolo_detection)
+            self.yolo_detector = YOLOOptimizer(on_detection=self._handle_yolo_detection)
             self.yolo_detector.start()
 
             config = CONFIG.copy()
@@ -338,9 +303,7 @@ class AudioLoop:
                 send_text_task = tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
-                if self.video_mode == "camera":
-                    tg.create_task(self.get_frames())
-                elif self.video_mode == "screen":
+                if self.video_mode == "screen":
                     tg.create_task(self.get_screen())
 
                 tg.create_task(self.receive_responses())
