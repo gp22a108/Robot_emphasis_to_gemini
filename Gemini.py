@@ -76,7 +76,7 @@ SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
-MODEL = "models/gemini-live-2.5-flash-preview"
+MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
 #MODEL = "models/gemini-live-2.5-flash-preview"
 
 DEFAULT_MODE = "camera"
@@ -254,10 +254,6 @@ class AudioLoop:
                         "CSotaMotion.SV_R_ELBOW": 0,
                         "CSotaMotion.SV_L_SHOULDER": -800,
                         "CSotaMotion.SV_L_ELBOW": 0,
-                        "CSotaMotion.SV_HEAD_Y": 0,
-                        "CSotaMotion.SV_HEAD_R": 0,
-                        "CSotaMotion.SV_BODY_Y": 0,
-                        "CSotaMotion.SV_HEAD_P": 0,
                     }
                     self.value += 1
                 else:
@@ -266,10 +262,6 @@ class AudioLoop:
                         "CSotaMotion.SV_R_ELBOW": 0,
                         "CSotaMotion.SV_L_SHOULDER": 900,
                         "CSotaMotion.SV_L_ELBOW": 0,
-                        "CSotaMotion.SV_HEAD_Y": 0,
-                        "CSotaMotion.SV_HEAD_R": 0,
-                        "CSotaMotion.SV_BODY_Y": 0,
-                        "CSotaMotion.SV_HEAD_P": 0,
                     }
                     self.value += 1
                 await self.robot_operation(pose_data_to_send)

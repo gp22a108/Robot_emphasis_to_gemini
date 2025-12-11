@@ -7,6 +7,9 @@ import sys
 import queue
 import traceback # エラー詳細表示用
 from pathlib import Path
+import json
+import urllib.request
+import urllib.error
 
 # OpenVINOのインポート
 import openvino as ov
@@ -47,6 +50,8 @@ class YOLOOptimizer:
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.current_frame_for_capture = None
+        self.last_person_seen_time = 0.0
+        self.last_pose_send_time = 0.0
 
         # 結果受け渡し用キュー (最大サイズを小さくして遅延を防ぐ)
         self.result_queue = queue.Queue(maxsize=2)
@@ -93,6 +98,42 @@ class YOLOOptimizer:
         num_jobs = len(self.infer_queue) if hasattr(self.infer_queue, '__len__') else self.infer_queue.jobs_number
         print(f"[情報] 非同期推論キューを初期化完了 (並列ジョブ数: {num_jobs})")
 
+    def _send_pose_update(self, pose_data):
+        """Http_realtime.py にポーズを送る"""
+        try:
+            url = "http://localhost:8000/pose"
+            data = json.dumps(pose_data).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=0.2):
+                pass
+        except Exception as e:
+            print(f"[YOLO] Failed to send pose: {e}")
+
+    def _update_robot_orientation(self, side, current_time):
+        """
+        side: 'left' / 'right' / 'center' / 'none'
+        current_time: time.time()
+        """
+        # 連続送信しすぎないためのレート制限
+        if current_time - self.last_pose_send_time < 0.5:
+            return
+
+        if side == "left":
+            pose = {"CSotaMotion.SV_BODY_Y": -400}
+        elif side == "right":
+            pose = {"CSotaMotion.SV_BODY_Y": 400}
+        elif side in ("center", "none"):
+            pose = {"CSotaMotion.SV_BODY_Y": 0}
+        else:
+            return
+
+        self._send_pose_update(pose)
+        self.last_pose_send_time = current_time
 
     def _setup_preprocessing(self):
         """
@@ -209,6 +250,8 @@ class YOLOOptimizer:
         PERSON_HEIGHT_THRESHOLD = 360
         current_time = time.time()
         detection_count = len(results)
+        best_h = 0
+        person_center_x = None
 
         # 物体の描画
         for res in results:
@@ -216,6 +259,11 @@ class YOLOOptimizer:
             confidence = res['confidence']
             class_id = res['class_id']
             label = CLASSES.get(class_id, 'Unknown')
+
+            if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
+                if h > best_h:
+                    best_h = h
+                    person_center_x = x + w / 2
 
             # 通知ロジック
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
@@ -233,6 +281,28 @@ class YOLOOptimizer:
             cv2.rectangle(frame, (x, y - text_h - 10), (x + text_w, y), color, -1)
             cv2.putText(frame, label_text, (x, y - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+
+        frame_h, frame_w = frame.shape[:2]
+        side = None
+
+        if best_h > 0 and person_center_x is not None:
+            # 人物が十分大きく写っているときだけ追従
+            if person_center_x < frame_w * 0.4:
+                side = "left"
+            elif person_center_x > frame_w * 0.6:
+                side = "right"
+            else:
+                side = "center"
+
+            # 最後に人物を見た時刻を更新
+            self.last_person_seen_time = current_time
+
+            # BODY_Y を左右 or 中央に更新
+            self._update_robot_orientation(side, current_time)
+        else:
+            # 人物が映っていない状態が長く続いたらニュートラルに戻す
+            if (current_time - self.last_person_seen_time) > 5.0:
+                self._update_robot_orientation("none", current_time)
 
         # パネル情報更新
         self.frame_count += 1
