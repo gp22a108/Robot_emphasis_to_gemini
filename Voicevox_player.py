@@ -107,50 +107,69 @@ def playback_worker(audio_queue: queue.Queue, ready_event: threading.Event):
             stream.close()
 
 
+def is_voicevox_running(session: requests.Session) -> bool:
+    """Voicevoxエンジンが起動しているか確認する"""
+    try:
+        response = session.get(f"{BASE_URL}/version", timeout=1)
+        response.raise_for_status()
+        print(f"[Voicevox] エンジン接続成功 (Version: {response.text})")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"\n[Voicevox Error] Voicevoxエンジンに接続できません。")
+        print(f"  - URL: {BASE_URL}")
+        print(f"  - エラー: {e}")
+        print(f"  - Voicevoxが起動しているか、ポート設定が正しいか確認してください。")
+        return False
+
+
 def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callable[[], None]] = None):
     """音声生成と再生のメインコントローラ"""
-    chunks = _create_chunks(text)
-    if not chunks:
-        return
+    with requests.Session() as session:
+        if not is_voicevox_running(session):
+            return  # エンジンがなければ処理を中断
 
-    num_chunks = len(chunks)
-    audio_queue = queue.Queue()
-    ready_event = threading.Event()
+        chunks = _create_chunks(text)
+        if not chunks:
+            return
 
-    player_thread = threading.Thread(target=playback_worker, args=(audio_queue, ready_event), daemon=True)
-    player_thread.start()
-    ready_event.wait(timeout=5.0)
+        num_chunks = len(chunks)
+        audio_queue = queue.Queue()
+        ready_event = threading.Event()
 
-    results_buffer = {}
-    next_index_to_send = 0
+        player_thread = threading.Thread(target=playback_worker, args=(audio_queue, ready_event), daemon=True)
+        player_thread.start()
+        ready_event.wait(timeout=5.0)
 
-    with requests.Session() as session, ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_index = {}
-        for i, chunk in enumerate(chunks):
-            future = executor.submit(generate_audio_chunk, session, chunk, speaker, i)
-            future_to_index[future] = i
+        results_buffer = {}
+        next_index_to_send = 0
 
-        for future in as_completed(future_to_index):
-            index, wav_data = future.result()
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_index = {}
+            for i, chunk in enumerate(chunks):
+                future = executor.submit(generate_audio_chunk, session, chunk, speaker, i)
+                future_to_index[future] = i
 
-            if wav_data:
-                results_buffer[index] = wav_data
-            else:
-                results_buffer[index] = None
+            for future in as_completed(future_to_index):
+                index, wav_data = future.result()
 
-            while next_index_to_send in results_buffer:
-                data = results_buffer.pop(next_index_to_send)
+                if wav_data:
+                    results_buffer[index] = wav_data
+                else:
+                    results_buffer[index] = None
 
-                if data:
-                    if next_index_to_send == num_chunks - 1 and on_last_chunk_start:
-                        print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
-                        on_last_chunk_start()
+                while next_index_to_send in results_buffer:
+                    data = results_buffer.pop(next_index_to_send)
 
-                    sys.stdout.write(f"\r再生中 ({next_index_to_send + 1}/{num_chunks})")
-                    sys.stdout.flush()
-                    audio_queue.put(data)
+                    if data:
+                        if next_index_to_send == num_chunks - 1 and on_last_chunk_start:
+                            print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
+                            on_last_chunk_start()
 
-                next_index_to_send += 1
+                        sys.stdout.write(f"\r再生中 ({next_index_to_send + 1}/{num_chunks})")
+                        sys.stdout.flush()
+                        audio_queue.put(data)
+
+                    next_index_to_send += 1
 
     audio_queue.put(None)
     player_thread.join()

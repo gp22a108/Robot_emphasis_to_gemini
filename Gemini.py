@@ -16,54 +16,37 @@
 """
 ## Setup
 
-To install the dependencies for this script, run:
-
-```
 pip install google-genai opencv-python pyaudio pillow mss aiohttp psutil
-```
 
-Before running this script, ensure the `GOOGLE_API_KEY` environment
-variable is set to the api-key you obtained from Google AI Studio.
+環境変数 GOOGLE_API_KEY を設定して実行してください。
 
-Important: **Use headphones**. This script uses the system default audio
-input and output, which often won't include echo cancellation. So to prevent
-the model from interrupting itself it is important that you use headphones.
-
-## Run
-
-To run the script:
-
-```
-python Get_started_LiveAPI.py
-```
-
-The script takes a video-mode flag `--mode`, this can be "camera", "screen", or "none".
-The default is "camera". To share your screen run:
-
-```
-python Get_started_LiveAPI.py --mode screen
-```
+python Gemini.py
+python Gemini.py --mode screen
 """
-import asyncio
-import base64
-import io
-import sys
+
 import time
+_t_start = time.perf_counter()
+print(f"[Gemini] プロセス起動。インポートを開始します...")
+
+import asyncio
+import io
 import traceback
 import argparse
 
 import aiohttp
 import cv2
+print(f"[Gemini] OpenCV/aiohttp インポート完了: {time.perf_counter() - _t_start:.3f}s")
+
 import pyaudio
 import PIL.Image
 import mss
+print(f"[Gemini] Audio/Imageライブラリ インポート完了: {time.perf_counter() - _t_start:.3f}s")
 
-from Voicevox_player import play_text
-from Capture import take_picture
-from YOLO import YOLOOptimizer  # YOLO.py から YOLOOptimizer をインポート
 import config  # 設定ファイル
 
 from google import genai
+from google.genai import types
+print(f"[Gemini] Google GenAI インポート完了 (準備完了): {time.perf_counter() - _t_start:.3f}s")
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -114,31 +97,42 @@ class AudioLoop:
         - 質問の後は会話を無理やり続けないでください。
         - 少し一つの会話の長さ控えめで
         - 写真撮影の同意を取ってください。
-        
+
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
-        
+
         1. 撮影の合図となるような、明るい返答をする（例：「いいよ、撮るね！」「はい、チーズ！」「撮るよ～」など）。
         2. **応答の最後（文末）**に、必ず `[CAPTURE_IMAGE]` という文字列を含める。
            ※この文字列はシステムがカメラを起動するためのトリガーです。絶対に省略や変更をしないでください。
-        
+
         ### 応答例
         AI：「オッケー！いい顔してるね〜。はい、とるよー [CAPTURE_IMAGE]」"""
         self.out_queue: asyncio.Queue | None = None
         self.session = None
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.yolo_detector: YOLOOptimizer | None = None
+        self.yolo_detector = None
         self.audio_stream = None
 
         self.mic_is_active = asyncio.Event()
         self.mic_is_active.set()
+
+    @staticmethod
+    def _user_turn(text: str) -> types.Content:
+        # google-genai 1.55.0 の send_client_content(turns=...) は Content が必要
+        return types.Content(
+            role="user",
+            parts=[types.Part(text=text)],
+        )
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
         print("YOLO detection event received, sending to Gemini.")
         if self.session and self.loop:
             asyncio.run_coroutine_threadsafe(
-                self.session.send(input="Detected", end_of_turn=True),
+                self.session.send_client_content(
+                    turns=self._user_turn("Detected"),
+                    turn_complete=True,
+                ),
                 self.loop,
             )
 
@@ -148,40 +142,45 @@ class AudioLoop:
             text = await asyncio.to_thread(input, "message > ")
             if text.lower() == "q":
                 break
-            await self.session.send(input=text or ".", end_of_turn=True)
+            await self.session.send_client_content(
+                turns=self._user_turn(text or "."),
+                turn_complete=True,
+            )
 
-    def _get_screen(self):
-        """画面キャプチャを 1 フレーム取得"""
+    def _get_screen_jpeg_bytes(self) -> bytes:
+        """画面キャプチャを 1 フレーム取得して JPEG bytes にする"""
         with mss.mss() as sct:
             monitor = sct.monitors[0]
             grabbed = sct.grab(monitor)
 
-        mime_type = "image/jpeg"
-        image_bytes = mss.tools.to_png(grabbed.rgb, grabbed.size)
-
-        img = PIL.Image.open(io.BytesIO(image_bytes))
+        img = PIL.Image.frombytes("RGB", grabbed.size, grabbed.rgb)
         buf = io.BytesIO()
-        img.save(buf, format="jpeg")
-        buf.seek(0)
-
-        encoded = base64.b64encode(buf.read()).decode()
-        return {"mime_type": mime_type, "data": encoded}
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
 
     async def get_screen(self):
-        """画面キャプチャを連続で Live API に送出"""
+        """画面キャプチャを連続で out_queue に投入（1fps）"""
         while True:
-            frame = await asyncio.to_thread(self._get_screen)
+            jpeg_bytes = await asyncio.to_thread(self._get_screen_jpeg_bytes)
             await asyncio.sleep(1.0)
-            await self.out_queue.put(frame)
+            await self.out_queue.put(
+                ("video", types.Blob(data=jpeg_bytes, mime_type="image/jpeg"))
+            )
 
     async def send_realtime(self):
         """out_queue から Live API にリアルタイム送信"""
         while True:
-            msg = await self.out_queue.get()
-            await self.session.send(input=msg)
+            kind, payload = await self.out_queue.get()
+
+            # send_realtime_input は 1 回で 1 引数だけ送る
+            if kind == "audio":
+                await self.session.send_realtime_input(audio=payload)
+            elif kind == "video":
+                # 静止画フレーム（image/jpeg）を video フレームとして送る
+                await self.session.send_realtime_input(video=payload)
 
     async def listen_audio(self):
-        """マイクから音声を取得して Live API に送信"""
+        """マイクから音声を取得して out_queue に投入"""
         mic_info = pya.get_default_input_device_info()
         self.audio_stream = await asyncio.to_thread(
             pya.open,
@@ -199,15 +198,13 @@ class AudioLoop:
             kwargs = {}
 
         while True:
-            data = await asyncio.to_thread(
-                self.audio_stream.read, CHUNK_SIZE, **kwargs
-            )
+            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
             if self.mic_is_active.is_set():
                 await self.out_queue.put(
-                    {
-                        "data": data,
-                        "mime_type": "audio/pcm;rate=16000",
-                    }
+                    (
+                        "audio",
+                        types.Blob(data=data, mime_type="audio/pcm;rate=16000"),
+                    )
                 )
 
     async def receive_responses(self):
@@ -241,6 +238,11 @@ class AudioLoop:
             print()
             gemini_output = "".join(response_chunks)
 
+            # 不要なタグを応答から削除
+            if "<user_out_of_view>" in gemini_output:
+                print(" -> 応答から '<user_out_of_view>' タグを削除しました。")
+                gemini_output = gemini_output.replace("<user_out_of_view>", "")
+
             if gemini_output:
                 print("\n--- [Full Response Captured] ---")
                 print(gemini_output)
@@ -262,6 +264,8 @@ class AudioLoop:
 
                 def capture_action():
                     print("--- 写真撮影タスクを非同期で開始します ---")
+                    from Capture import take_picture  # 遅延インポート
+
                     frame_to_capture = self.yolo_detector.get_current_frame()
                     coro = asyncio.to_thread(take_picture, frame_to_capture, 0)
                     asyncio.run_coroutine_threadsafe(coro, self.loop)
@@ -270,6 +274,8 @@ class AudioLoop:
 
             # Voicevox で読み上げ
             if text_to_play:
+                from Voicevox_player import play_text  # 遅延インポート
+
                 await asyncio.to_thread(
                     play_text,
                     text_to_play,
@@ -289,10 +295,12 @@ class AudioLoop:
         t0 = time.perf_counter()
         c0 = time.process_time()
         try:
+            print("[Gemini] YOLOモジュールを遅延インポート中...")
+            from YOLO import YOLOOptimizer
+            print(f"[Gemini] YOLOモジュール インポート完了: {time.perf_counter() - _t_start:.3f}s")
+
             # YOLO 検出器を初期化して開始
-            self.yolo_detector = YOLOOptimizer(
-                on_detection=self._handle_yolo_detection
-            )
+            self.yolo_detector = YOLOOptimizer(on_detection=self._handle_yolo_detection)
             self.yolo_detector.start()
 
             live_config = CONFIG.copy()

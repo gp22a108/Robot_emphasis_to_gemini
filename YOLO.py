@@ -83,8 +83,8 @@ class YOLOOptimizer:
         last_time, last_cpu = measure_and_print("OpenVINO Runtime起動", last_time, last_cpu, p)
 
         # ログ追加: 認識されているデバイス一覧を表示
-        print(f"[情報] 利用可能なOpenVINOデバイス: {self.core.available_devices}")
-        last_time, last_cpu = measure_and_print("利用可能デバイス取得", last_time, last_cpu, p)
+        # print(f"[情報] 利用可能なOpenVINOデバイス: {self.core.available_devices}")
+        # last_time, last_cpu = measure_and_print("利用可能デバイス取得", last_time, last_cpu, p)
 
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)

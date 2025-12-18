@@ -4,6 +4,7 @@ import os
 import time
 
 if __name__ == "__main__":
+    total_start_time = time.perf_counter()
     print("main.py is running.")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,52 +12,27 @@ if __name__ == "__main__":
 
     processes = []
 
-    # Start Http_realtime.py
-    try:
-        http_realtime_path = os.path.join(script_dir, "Http_realtime.py")
-        if not os.path.exists(http_realtime_path):
-            raise FileNotFoundError(f"Http_realtime.py not found at {http_realtime_path}")
-        p = subprocess.Popen([python_executable, http_realtime_path])
-        processes.append(p)
-        print("Http_realtime.py is running in the background.")
-    except Exception as e:
-        print(f"Failed to start Http_realtime.py: {e}")
+    def start_process(script_name):
+        start_time = time.perf_counter()
+        try:
+            script_path = os.path.join(script_dir, script_name)
+            if not os.path.exists(script_path):
+                raise FileNotFoundError(f"{script_name} not found at {script_path}")
+            p = subprocess.Popen([python_executable, script_path])
+            processes.append(p)
+            elapsed = time.perf_counter() - start_time
+            print(f"{script_name} is running in the background. (Startup time: {elapsed:.3f}s)")
+        except Exception as e:
+            elapsed = time.perf_counter() - start_time
+            print(f"Failed to start {script_name}: {e} (Attempted for: {elapsed:.3f}s)")
 
-    # # Start YOLO.py
-    # try:
-    #     yolo_path = os.path.join(script_dir, "YOLO.py")
-    #     if not os.path.exists(yolo_path):
-    #         raise FileNotFoundError(f"YOLO.py not found at {yolo_path}")
-    #     p = subprocess.Popen([python_executable, yolo_path])
-    #     processes.append(p)
-    #     print("YOLO.py is running in the background.")
-    # except Exception as e:
-    #     print(f"Failed to start YOLO.py: {e}")
+    # 各プロセスを起動
+    start_process("Http_realtime.py")
+    start_process("Gemini.py")
+    start_process("PyView.py")
 
-    # Start Gemini.py
-    try:
-        gemini_path = os.path.join(script_dir, "Gemini.py")
-        if not os.path.exists(gemini_path):
-            raise FileNotFoundError(f"Gemini.py not found at {gemini_path}")
-        # We will modify Gemini.py to watch for a file instead of a threshold argument
-        p = subprocess.Popen([python_executable, gemini_path])
-        processes.append(p)
-        print("Gemini.py is running in the background.")
-    except Exception as e:
-        print(f"Failed to start Gemini.py: {e}")
-
-    # Start PyView.py
-    try:
-        pyview_path = os.path.join(script_dir, "PyView.py")
-        if not os.path.exists(pyview_path):
-            raise FileNotFoundError(f"PyView.py not found at {pyview_path}")
-        p = subprocess.Popen([python_executable, pyview_path])
-        processes.append(p)
-        print("PyView.py is running in the background.")
-    except Exception as e:
-        print(f"Failed to start PyView.py: {e}")
-
-    print("\nAll processes started. Monitoring for termination...")
+    total_elapsed = time.perf_counter() - total_start_time
+    print(f"\nAll processes started in {total_elapsed:.3f}s. Monitoring for termination...")
 
     try:
         # Wait for all processes to complete
