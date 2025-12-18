@@ -74,21 +74,21 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
         if self.path == '/pose':
             content_length = int(self.headers['Content-Length'])
             post_body = self.rfile.read(content_length)
-            
+
             try:
                 received_data = json.loads(post_body)
-                
+
                 with data_lock:
                     for key, value in received_data.items():
                         if key in pose_data:
                             pose_data[key] = value
-                
+
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 response = {'status': 'success', 'message': 'Pose data updated'}
                 self.wfile.write(json.dumps(response).encode('utf-8'))
-                
+
             except json.JSONDecodeError:
                 self.send_response(400)
                 self.send_header('Content-type', 'application/json')

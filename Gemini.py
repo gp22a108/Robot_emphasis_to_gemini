@@ -19,7 +19,7 @@
 To install the dependencies for this script, run:
 
 ```
-pip install google-genai opencv-python pyaudio pillow mss aiohttp
+pip install google-genai opencv-python pyaudio pillow mss aiohttp psutil
 ```
 
 Before running this script, ensure the `GOOGLE_API_KEY` environment
@@ -48,6 +48,7 @@ import asyncio
 import base64
 import io
 import sys
+import time
 import traceback
 import argparse
 
@@ -103,7 +104,7 @@ def list_audio_devices():
 class AudioLoop:
     def __init__(self, video_mode: str = DEFAULT_MODE):
         self.video_mode = video_mode
-        self.system_instruction = """### 役割と振る舞いc
+        self.system_instruction = """### 役割と振る舞い
         - 必ず、テキストを出力してください。
         - ユーザーに対しては、友達のように親しみやすく、少し馴れ馴れしい口調（タメ口など）で接してください。
         - 基本的にすべて日本語で回答してください。
@@ -131,8 +132,6 @@ class AudioLoop:
 
         self.mic_is_active = asyncio.Event()
         self.mic_is_active.set()
-
-        self.value = 0  # ロボットポーズの切り替え用
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
@@ -269,25 +268,6 @@ class AudioLoop:
 
                 capture_callback = capture_action
 
-            # --- Robot motion ---
-            if self.value % 2 == 0:
-                pose_data_to_send = {
-                    "CSotaMotion.SV_R_SHOULDER": 800,
-                    "CSotaMotion.SV_R_ELBOW": 0,
-                    "CSotaMotion.SV_L_SHOULDER": -800,
-                    "CSotaMotion.SV_L_ELBOW": 0,
-                }
-            else:
-                pose_data_to_send = {
-                    "CSotaMotion.SV_R_SHOULDER": -900,
-                    "CSotaMotion.SV_R_ELBOW": 0,
-                    "CSotaMotion.SV_L_SHOULDER": 900,
-                    "CSotaMotion.SV_L_ELBOW": 0,
-                }
-            self.value += 1
-
-            await self.robot_operation(pose_data_to_send)
-
             # Voicevox で読み上げ
             if text_to_play:
                 await asyncio.to_thread(
@@ -306,6 +286,8 @@ class AudioLoop:
     async def run(self):
         """メインのタスクグループを立ち上げる"""
         self.loop = asyncio.get_running_loop()
+        t0 = time.perf_counter()
+        c0 = time.process_time()
         try:
             # YOLO 検出器を初期化して開始
             self.yolo_detector = YOLOOptimizer(
@@ -342,22 +324,9 @@ class AudioLoop:
         finally:
             if self.yolo_detector:
                 self.yolo_detector.stop()
-
-    async def robot_operation(self, pose_data: dict):
-        """ロボット用 HTTP API にポーズデータを送信"""
-        try:
-            url = "http://localhost:8000/pose"
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=pose_data) as response:
-                    if response.status == 200:
-                        print("Successfully sent pose data to Http_realtime.py")
-                    else:
-                        print(
-                            f"Failed to send pose data to Http_realtime.py. "
-                            f"Status: {response.status}"
-                        )
-        except Exception as e:
-            print(f"Failed to send pose data to Http_realtime.py: {e}")
+            elapsed_wall = time.perf_counter() - t0
+            elapsed_cpu = time.process_time() - c0
+            print(f"wall={elapsed_wall:.6f}s cpu={elapsed_cpu:.6f}s")
 
 
 if __name__ == "__main__":

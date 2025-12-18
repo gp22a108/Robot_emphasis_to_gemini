@@ -1,3 +1,4 @@
+
 import cv2
 import time
 import numpy as np
@@ -7,9 +8,7 @@ import sys
 import queue
 import traceback # エラー詳細表示用
 from pathlib import Path
-import json
-import urllib.request
-import urllib.error
+import psutil # CPU占有率の計測に必要
 
 # OpenVINOのインポート
 import openvino as ov
@@ -33,6 +32,15 @@ DETECTION_INTERVAL = config.DETECTION_INTERVAL
 
 CLASSES = config.CLASSES
 
+def measure_and_print(step_name, start_time, start_cpu, process):
+    """処理時間とCPU占有率を計測して表示するヘルパー関数"""
+    elapsed_wall = time.perf_counter() - start_time
+    elapsed_cpu = time.process_time() - start_cpu
+    # interval=Noneで非ブロッキング。ただし2回目以降の呼び出しで意味のある値
+    cpu_percent = process.cpu_percent(interval=None)
+    print(f"  -> 計測({step_name}): wall={elapsed_wall:.3f}s, cpu={elapsed_cpu:.3f}s, cpu%={cpu_percent:.1f}%")
+    return time.perf_counter(), time.process_time()
+
 class YOLOOptimizer:
     def __init__(self, model_path=MODEL_PATH, device_name=DEVICE_NAME, cache_dir=CACHE_DIR, input_size=MODEL_INPUT_SIZE, on_detection=None):
         """
@@ -51,7 +59,6 @@ class YOLOOptimizer:
         self.pause_event = threading.Event()
         self.current_frame_for_capture = None
         self.last_person_seen_time = 0.0
-        self.last_pose_send_time = 0.0
 
         # 結果受け渡し用キュー (最大サイズを小さくして遅延を防ぐ)
         self.result_queue = queue.Queue(maxsize=2)
@@ -62,16 +69,28 @@ class YOLOOptimizer:
             print("  yolo export model=yolov12n.pt format=openvino\n")
             raise FileNotFoundError(f"Model not found at {model_path}")
 
+        # --- 計測の準備 ---
+        p = psutil.Process()
+        p.cpu_percent(None)  # 最初の呼び出しは意味のない値を返すことがあるため、一度呼び出しておく
+        time.sleep(0.1) # 少し待ってから計測開始
+        total_start_time = time.perf_counter()
+        total_start_cpu = time.process_time()
+        last_time, last_cpu = total_start_time, total_start_cpu
+        # --- 計測開始 ---
+
         print("[初期化] OpenVINO Runtimeを起動中...")
         self.core = ov.Core()
+        last_time, last_cpu = measure_and_print("OpenVINO Runtime起動", last_time, last_cpu, p)
 
         # ログ追加: 認識されているデバイス一覧を表示
         print(f"[情報] 利用可能なOpenVINOデバイス: {self.core.available_devices}")
+        last_time, last_cpu = measure_and_print("利用可能デバイス取得", last_time, last_cpu, p)
 
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
         self.core.set_property({ov.properties.cache_dir: str(cache_path)})
         print(f"[情報] モデルキャッシュを有効化: {cache_path}")
+        last_time, last_cpu = measure_and_print("モデルキャッシュ有効化", last_time, last_cpu, p)
 
         # GPU利用時の最適化設定
         if "GPU" in device_name or "AUTO" in device_name:
@@ -81,8 +100,10 @@ class YOLOOptimizer:
 
         print(f"[情報] モデルを読み込んでいます: {model_path}")
         self.model = self.core.read_model(model_path)
+        last_time, last_cpu = measure_and_print("モデル読み込み", last_time, last_cpu, p)
 
         self._setup_preprocessing()
+        last_time, last_cpu = measure_and_print("前処理プロセス統合", last_time, last_cpu, p)
 
         print(f"[情報] モデルをデバイス({device_name})向けにコンパイル中...")
         try:
@@ -91,49 +112,17 @@ class YOLOOptimizer:
             print(f"[エラー] モデルのコンパイルに失敗しました。\n詳細: {e}")
             print("ヒント: GPUドライバが古い場合や、デバイス名が異なる可能性があります。")
             raise
+        last_time, last_cpu = measure_and_print("モデルコンパイル", last_time, last_cpu, p)
 
         self.infer_queue = ov.AsyncInferQueue(self.compiled_model, jobs=0)
         self.infer_queue.set_callback(self._completion_callback)
 
         num_jobs = len(self.infer_queue) if hasattr(self.infer_queue, '__len__') else self.infer_queue.jobs_number
         print(f"[情報] 非同期推論キューを初期化完了 (並列ジョブ数: {num_jobs})")
-
-    def _send_pose_update(self, pose_data):
-        """Http_realtime.py にポーズを送る"""
-        try:
-            url = "http://localhost:8000/pose"
-            data = json.dumps(pose_data).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=0.2):
-                pass
-        except Exception as e:
-            print(f"[YOLO] Failed to send pose: {e}")
-
-    def _update_robot_orientation(self, side, current_time):
-        """
-        side: 'left' / 'right' / 'center' / 'none'
-        current_time: time.time()
-        """
-        # 連続送信しすぎないためのレート制限
-        if current_time - self.last_pose_send_time < 0.5:
-            return
-
-        if side == "left":
-            pose = {"CSotaMotion.SV_BODY_Y": -400}
-        elif side == "right":
-            pose = {"CSotaMotion.SV_BODY_Y": 400}
-        elif side in ("center", "none"):
-            pose = {"CSotaMotion.SV_BODY_Y": 0}
-        else:
-            return
-
-        self._send_pose_update(pose)
-        self.last_pose_send_time = current_time
+        last_time, last_cpu = measure_and_print("非同期推論キュー初期化", last_time, last_cpu, p)
+        
+        # --- 全体の計測結果 ---
+        measure_and_print("初期化全体", total_start_time, total_start_cpu, p)
 
     def _setup_preprocessing(self):
         """
@@ -282,27 +271,9 @@ class YOLOOptimizer:
             cv2.putText(frame, label_text, (x, y - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
-        frame_h, frame_w = frame.shape[:2]
-        side = None
-
         if best_h > 0 and person_center_x is not None:
-            # 人物が十分大きく写っているときだけ追従
-            if person_center_x < frame_w * 0.4:
-                side = "left"
-            elif person_center_x > frame_w * 0.6:
-                side = "right"
-            else:
-                side = "center"
-
             # 最後に人物を見た時刻を更新
             self.last_person_seen_time = current_time
-
-            # BODY_Y を左右 or 中央に更新
-            self._update_robot_orientation(side, current_time)
-        else:
-            # 人物が映っていない状態が長く続いたらニュートラルに戻す
-            if (current_time - self.last_person_seen_time) > 5.0:
-                self._update_robot_orientation("none", current_time)
 
         # パネル情報更新
         self.frame_count += 1
@@ -356,7 +327,7 @@ class YOLOOptimizer:
                 if not ret:
                     print("[情報] 映像ストリーム終了")
                     break
-                
+
                 self.current_frame_for_capture = frame.copy()
 
                 h, w = frame.shape[:2]
