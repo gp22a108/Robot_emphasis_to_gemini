@@ -5,7 +5,8 @@ import threading
 import time
 import requests
 import sounddevice as sd
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
+import traceback
 from typing import Callable, Optional
 import config  # 設定ファイルをインポート
 
@@ -26,7 +27,8 @@ def generate_audio_chunk(session: requests.Session, text: str, speaker: int, ind
 
     try:
         query_params = {"text": text, "speaker": speaker}
-        query_res = session.post(f"{BASE_URL}/audio_query", params=query_params, timeout=REQUEST_TIMEOUT)
+        # audio_query のタイムアウトを少し長めに確保
+        query_res = session.post(f"{BASE_URL}/audio_query", params=query_params, timeout=max(REQUEST_TIMEOUT, 5))
         query_res.raise_for_status()
 
         audio_query = query_res.json()
@@ -47,11 +49,12 @@ def generate_audio_chunk(session: requests.Session, text: str, speaker: int, ind
 
 
 def _create_chunks(text: str) -> list[str]:
-    """テキストを句読点で分割する"""
+    """テキストを句読点で分割する（テスト用・一括変換用）"""
     text = text.strip()
     if not text:
         return []
 
+    # 句読点（、。！？）または改行で分割する。ただし、分割記号はチャンクの末尾に含める。
     split_pattern = r'(?<=[、。！？\n])'
     parts = re.split(split_pattern, text)
 
@@ -63,130 +66,287 @@ def _create_chunks(text: str) -> list[str]:
     return chunks
 
 
-def playback_worker(audio_queue: queue.Queue, ready_event: threading.Event):
-    """
-    再生ワーカー: ストリームを先に開いてから、データの到着を待つ
-    """
-    stream = None
+class VoicevoxStreamPlayer:
+    def __init__(self, speaker: int, on_last_chunk_start: Optional[Callable[[], None]] = None):
+        self.speaker = speaker
+        self.on_last_chunk_start = on_last_chunk_start
+        self.is_connected = False
+        self._text_buffer = ""  # ストリーミング用テキストバッファ
 
-    try:
-        stream = sd.RawOutputStream(
-            samplerate=SAMPLE_RATE,
-            blocksize=0,
-            channels=CHANNELS,
-            dtype='int16',
-            latency='high'
-        )
-        stream.start()
-        time.sleep(0.1)
-        ready_event.set()
+        self._session = requests.Session()
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._audio_queue = queue.Queue()
+        self._text_queue = queue.Queue()
+        self._results_buffer = {}
+        self._next_index_to_play = 0
+        self._next_index_to_generate = 0
+        self._is_generation_finished = False
+        self._total_chunks_added = 0
+        self._last_chunk_callback_triggered = threading.Event()
 
+        self._playback_ready = threading.Event()
+        self._player_thread = threading.Thread(target=self._playback_worker, daemon=True)
+        self._generation_thread = threading.Thread(target=self._generation_worker, daemon=True)
+
+        if not self._is_voicevox_running():
+            self._executor.shutdown()
+            return
+
+        self._player_thread.start()
+        self._generation_thread.start()
+        self._playback_ready.wait(timeout=5.0)
+        
+        # 再生スレッドが正常に開始したか確認
+        if not self._playback_ready.is_set() or not self._player_thread.is_alive():
+            self.close()
+            print("[Voicevox Error] Failed to initialize audio playback stream.")
+            return
+        
+        self.is_connected = True
+
+    def _is_voicevox_running(self) -> bool:
+        """Voicevoxエンジンが起動しているか確認する"""
+        try:
+            response = self._session.get(f"{BASE_URL}/version", timeout=2)
+            response.raise_for_status()
+            print(f"[Voicevox] エンジン接続成功 (Version: {response.text})")
+            return True
+        except requests.exceptions.RequestException:
+            print(f"\n[Voicevox Error] Voicevoxエンジンに接続できません。URL: {BASE_URL}")
+            return False
+
+    def _playback_worker(self):
+        """音声データをキューから受け取り再生するワーカー"""
+        stream = None
+        try:
+            stream = sd.RawOutputStream(
+                samplerate=SAMPLE_RATE, blocksize=0, channels=CHANNELS,
+                dtype='int16', latency='low'
+            )
+            stream.start()
+            self._playback_ready.set()
+
+            while True:
+                item = self._audio_queue.get()
+                if item is None:
+                    self._audio_queue.task_done()
+                    break
+                
+                try:
+                    index, pcm_data = item
+                    
+                    if self.on_last_chunk_start and self._is_generation_finished and index == self._total_chunks_added - 1:
+                        if not self._last_chunk_callback_triggered.is_set():
+                            print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
+                            self.on_last_chunk_start()
+                            self._last_chunk_callback_triggered.set()
+
+                    if pcm_data:
+                        stream.write(pcm_data)
+                except Exception as e:
+                    print(f"\n[Voicevox Error] 再生中のエラー: {e}")
+                finally:
+                    self._audio_queue.task_done()
+
+        except Exception as e:
+            print(f"\n[Voicevox Error] 再生エラー: {e}")
+            if not self._playback_ready.is_set():
+                 self._playback_ready.set()
+        finally:
+            if stream:
+                stream.stop()
+                stream.close()
+
+    def _flush_results_buffer(self):
+        """バッファ内の完了したチャンクを順番に再生キューへ移動する"""
+        while self._next_index_to_play in self._results_buffer:
+            pcm_data = self._results_buffer.pop(self._next_index_to_play)
+            total_chunks_str = f"{self._total_chunks_added}" if self._is_generation_finished else "?"
+            try:
+                sys.stdout.write(f"\r再生中 ({self._next_index_to_play + 1}/{total_chunks_str})...")
+                sys.stdout.flush()
+            except Exception:
+                pass
+            self._audio_queue.put((self._next_index_to_play, pcm_data))
+            self._next_index_to_play += 1
+
+    def _generation_worker(self):
+        """テキストチャンクを処理し、音声生成タスクを管理するワーカー"""
+        future_to_index = {}
         while True:
             try:
-                chunk = audio_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
+                try:
+                    text_chunk = self._text_queue.get(timeout=0.05)
+                    if text_chunk is None:
+                        self._is_generation_finished = True
+                        self._total_chunks_added = self._next_index_to_generate
+                        self._text_queue.task_done()
+                        break 
+                    
+                    try:
+                        index = self._next_index_to_generate
+                        future = self._executor.submit(generate_audio_chunk, self._session, text_chunk, self.speaker, index)
+                        future_to_index[future] = index
+                        self._next_index_to_generate += 1
+                    finally:
+                        self._text_queue.task_done()
+                except queue.Empty:
+                    pass
 
-            if chunk is None:
-                audio_queue.task_done()
+                if future_to_index:
+                    done, not_done = wait(future_to_index.keys(), timeout=0.01)
+                    for future in done:
+                        index = future_to_index.pop(future)
+                        try:
+                            _, wav_data = future.result()
+                            if wav_data and len(wav_data) > WAV_HEADER_SIZE:
+                                self._results_buffer[index] = wav_data[WAV_HEADER_SIZE:]
+                            else:
+                                self._results_buffer[index] = None
+                        except Exception as e:
+                            print(f"[Error] Future result error (index {index}): {e}")
+                            self._results_buffer[index] = None
+                    
+                    self._flush_results_buffer()
+
+            except Exception as e:
+                print(f"[Fatal Error] Generation worker crashed: {e}")
+                traceback.print_exc()
                 break
 
-            if len(chunk) > WAV_HEADER_SIZE:
-                pcm_data = chunk[WAV_HEADER_SIZE:]
-                stream.write(pcm_data)
+        if future_to_index:
+            done, not_done = wait(future_to_index.keys())
+            for future in done:
+                index = future_to_index.pop(future)
+                try:
+                    _, wav_data = future.result()
+                    if wav_data and len(wav_data) > WAV_HEADER_SIZE:
+                        self._results_buffer[index] = wav_data[WAV_HEADER_SIZE:]
+                    else:
+                        self._results_buffer[index] = None
+                except Exception:
+                    self._results_buffer[index] = None
+            self._flush_results_buffer()
 
-            audio_queue.task_done()
+    def add_text(self, text: str):
+        """再生するテキストチャンクを追加する（句読点待ちバッファリング付き）"""
+        if not self.is_connected: return
+        if self._is_generation_finished:
+            print("Warning: Player is already finished. Cannot add more text.")
+            return
+        
+        self._text_buffer += text
+        
+        # 句読点（、。！？）または改行で分割
+        split_pattern = r'(?<=[、。！？\n])'
+        parts = re.split(split_pattern, self._text_buffer)
+        
+        # 最後の要素以外は「文」として確定しているのでキューに追加
+        # 最後の要素はまだ途中かもしれないのでバッファに残す
+        for part in parts[:-1]:
+            if part.strip():
+                self._text_queue.put(part.strip())
+        
+        self._text_buffer = parts[-1]
 
-    except Exception as e:
-        print(f"\n再生エラー: {e}")
-        ready_event.set()
-    finally:
-        if stream:
-            time.sleep(0.2)
-            stream.stop()
-            stream.close()
+    def finish(self):
+        """テキストの追加が完了したことを通知する"""
+        if not self.is_connected: return
+        
+        # バッファに残っているテキストがあればキューに追加
+        if self._text_buffer.strip():
+            self._text_queue.put(self._text_buffer.strip())
+        self._text_buffer = ""
+            
+        self._text_queue.put(None)
 
+    def wait_done(self):
+        """すべての音声の生成と再生が完了するのを待つ"""
+        if not self.is_connected: return
 
-def is_voicevox_running(session: requests.Session) -> bool:
-    """Voicevoxエンジンが起動しているか確認する"""
-    try:
-        response = session.get(f"{BASE_URL}/version", timeout=1)
-        response.raise_for_status()
-        print(f"[Voicevox] エンジン接続成功 (Version: {response.text})")
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"\n[Voicevox Error] Voicevoxエンジンに接続できません。")
-        print(f"  - URL: {BASE_URL}")
-        print(f"  - エラー: {e}")
-        print(f"  - Voicevoxが起動しているか、ポート設定が正しいか確認してください。")
-        return False
+        # 全てのテキストがキューに追加され、生成スレッドで処理されるのを待つ
+        self._text_queue.join()
+        if self._generation_thread and self._generation_thread.is_alive():
+            self._generation_thread.join()
+
+        # 全ての音声データが再生キューに追加され、再生スレッドに渡されるのを待つ
+        self._audio_queue.join()
+
+        # 再生スレッドに終了シグナルを送り、スレッドが終了するのを待つ（これが実際の再生完了を待つ）
+        self._audio_queue.put(None)
+        if self._player_thread and self._player_thread.is_alive():
+            self._player_thread.join()
+
+    def close(self):
+        """リソースを解放する"""
+        if hasattr(self, '_text_queue') and self._text_queue:
+            self._text_queue.put(None)
+        if hasattr(self, '_audio_queue') and self._audio_queue:
+            self._audio_queue.put(None)
+        
+        # wait_done()が呼ばれなかった場合などに備え、スレッドの終了を待つ
+        if hasattr(self, '_player_thread') and self._player_thread and self._player_thread.is_alive():
+            self._player_thread.join(timeout=1)
+        
+        if hasattr(self, '_executor') and self._executor:
+             self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callable[[], None]] = None):
-    """音声生成と再生のメインコントローラ"""
-    with requests.Session() as session:
-        if not is_voicevox_running(session):
-            return  # エンジンがなければ処理を中断
-
-        chunks = _create_chunks(text)
-        if not chunks:
-            return
-
-        num_chunks = len(chunks)
-        audio_queue = queue.Queue()
-        ready_event = threading.Event()
-
-        player_thread = threading.Thread(target=playback_worker, args=(audio_queue, ready_event), daemon=True)
-        player_thread.start()
-        ready_event.wait(timeout=5.0)
-
-        results_buffer = {}
-        next_index_to_send = 0
-
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_index = {}
-            for i, chunk in enumerate(chunks):
-                future = executor.submit(generate_audio_chunk, session, chunk, speaker, i)
-                future_to_index[future] = i
-
-            for future in as_completed(future_to_index):
-                index, wav_data = future.result()
-
-                if wav_data:
-                    results_buffer[index] = wav_data
-                else:
-                    results_buffer[index] = None
-
-                while next_index_to_send in results_buffer:
-                    data = results_buffer.pop(next_index_to_send)
-
-                    if data:
-                        if next_index_to_send == num_chunks - 1 and on_last_chunk_start:
-                            print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
-                            on_last_chunk_start()
-
-                        sys.stdout.write(f"\r再生中 ({next_index_to_send + 1}/{num_chunks})")
-                        sys.stdout.flush()
-                        audio_queue.put(data)
-
-                    next_index_to_send += 1
-
-    audio_queue.put(None)
-    player_thread.join()
-    print("\n再生終了")
+    """[互換性のため] テキスト全体を受け取って再生する"""
+    player = None
+    try:
+        player = VoicevoxStreamPlayer(speaker=speaker, on_last_chunk_start=on_last_chunk_start)
+        if player.is_connected:
+            # この関数は一括なので、バッファリングロジックは使わず、直接チャンクに分ける
+            chunks = _create_chunks(text)
+            for chunk in chunks:
+                player._text_queue.put(chunk) # バッファを介さず直接キューに入れる
+            player.finish()
+            player.wait_done()
+            player.close() # play_textではここで閉じる
+    except Exception as e:
+        print(f"An unexpected error occurred in play_text: {e}")
+        if player:
+            player.close()
 
 
 def main():
+    """テスト用のメイン関数"""
     try:
         text_to_play = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else \
-            "これはsounddeviceを使った修正版のコードです。最初の無音が解消され、スムーズに再生されます。"
+            "これはストリーミング再生のテストです。テキストが、このように、少しずつ、追加されても、スムーズに、再生されるはずです。"
 
         def example_callback():
             print("\n*** ラストチャンクの再生が始まりました！ ***")
 
+        print("--- [Test 1] play_text (互換モード) ---")
         play_text(text_to_play, speaker=config.SPEAKER_ID, on_last_chunk_start=example_callback)
+        
+        print("\n\n--- [Test 2] VoicevoxStreamPlayer (ストリーミングモード) ---")
+        
+        player = VoicevoxStreamPlayer(speaker=config.SPEAKER_ID, on_last_chunk_start=example_callback)
+        if not player.is_connected:
+            print("プレーヤーが接続されていないため、テストをスキップします。")
+            return
+
+        # テキストを少しずつ追加していく（断片的な入力をシミュレート）
+        parts = ["これは", "ストリーミング", "再生の", "テストです。", "テキストが、", "このように、", "少しずつ、", "追加されても、", "スムーズに、", "再生されるはずです。"]
+        
+        for part in parts:
+            if part.strip():
+                print(f"  -> Adding chunk: '{part.strip()}'")
+                player.add_text(part)
+                time.sleep(0.5)
+        
+        player.finish()
+        player.wait_done()
+        player.close()
+
     except KeyboardInterrupt:
         print("\n再生を中断しました。")
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 if __name__ == "__main__":

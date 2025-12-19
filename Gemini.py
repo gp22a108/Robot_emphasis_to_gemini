@@ -209,85 +209,100 @@ class AudioLoop:
 
     async def receive_responses(self):
         """Live API からのレスポンスを受信し、テキストを組み立てて処理"""
+        from Voicevox_player import VoicevoxStreamPlayer  # 遅延インポート
+
         while True:
-            response_chunks: list[str] = []
+            player = None
+            capture_callback_triggered = asyncio.Event()
 
-            # 1 ターン分のレスポンスストリーム
-            turn = self.session.receive()
-
-            async for response in turn:
-                text = None
-
-                # 将来 TEXT モデルを使う場合の互換: response.text
-                if getattr(response, "text", None):
-                    text = response.text
-
-                # native audio + transcription 用
-                server_content = getattr(response, "server_content", None)
-                if server_content is not None:
-                    output_tx = getattr(server_content, "output_transcription", None)
-                    if output_tx is not None and getattr(output_tx, "text", None):
-                        text = output_tx.text
-
-                if not text:
-                    continue
-
-                print(text, end="")
-                response_chunks.append(text)
-
-            print()
-            gemini_output = "".join(response_chunks)
-
-            # 不要なタグを応答から削除
-            if "<user_out_of_view>" in gemini_output:
-                print(" -> 応答から '<user_out_of_view>' タグを削除しました。")
-                gemini_output = gemini_output.replace("<user_out_of_view>", "")
-
-            if gemini_output:
-                print("\n--- [Full Response Captured] ---")
-                print(gemini_output)
-                print("--------------------------------\n")
-
-            # モデル発話中はマイク／YOLO を一時停止
-            self.mic_is_active.clear()
-            print("--- Mic paused while speaking ---")
-            if self.yolo_detector:
-                self.yolo_detector.pause()
-
-            text_to_play = gemini_output
-            capture_callback = None
-
-            # 撮影トリガー検出
-            if "[CAPTURE_IMAGE]" in gemini_output:
-                print("!!! 撮影トリガーを検出しました !!!")
-                text_to_play = gemini_output.replace("[CAPTURE_IMAGE]", "").strip()
-
-                def capture_action():
+            def capture_action():
+                if not capture_callback_triggered.is_set():
                     print("--- 写真撮影タスクを非同期で開始します ---")
                     from Capture import take_picture  # 遅延インポート
 
                     frame_to_capture = self.yolo_detector.get_current_frame()
                     coro = asyncio.to_thread(take_picture, frame_to_capture, 0)
                     asyncio.run_coroutine_threadsafe(coro, self.loop)
+                    capture_callback_triggered.set()
 
-                capture_callback = capture_action
+            try:
+                # 1 ターン分のレスポンスストリーム
+                turn = self.session.receive()
+                has_received_text = False
+                full_response_text = []
 
-            # Voicevox で読み上げ
-            if text_to_play:
-                from Voicevox_player import play_text  # 遅延インポート
+                async for response in turn:
+                    text = None
 
-                await asyncio.to_thread(
-                    play_text,
-                    text_to_play,
-                    speaker=config.SPEAKER_ID,
-                    on_last_chunk_start=capture_callback,
-                )
+                    # 将来 TEXT モデルを使う場合の互換: response.text
+                    if getattr(response, "text", None):
+                        text = response.text
 
-            # マイク／YOLO を再開
-            self.mic_is_active.set()
-            print("--- Mic resumed ---")
-            if self.yolo_detector:
-                self.yolo_detector.resume()
+                    # native audio + transcription 用
+                    server_content = getattr(response, "server_content", None)
+                    if server_content is not None:
+                        output_tx = getattr(server_content, "output_transcription", None)
+                        if output_tx is not None and getattr(output_tx, "text", None):
+                            text = output_tx.text
+
+                    if not text:
+                        continue
+
+                    if not has_received_text:
+                        has_received_text = True
+                        # 最初のテキストを受け取ったらマイクを停止し、再生プレーヤーを初期化
+                        self.mic_is_active.clear()
+                        print("\n--- Mic paused while speaking ---")
+                        if self.yolo_detector:
+                            self.yolo_detector.pause()
+                        
+                        player = VoicevoxStreamPlayer(
+                            speaker=config.SPEAKER_ID,
+                            on_last_chunk_start=None # ストリーミング中はコールバックを直接制御
+                        )
+                        if not player.is_connected:
+                            print(f"\n[Warning] Voicevoxへの接続に失敗しました。音声再生をスキップします。")
+                            player = None
+
+                    full_response_text.append(text)
+                    
+                    # CAPTURE_IMAGEトリガーを検出し、再生用のテキストから削除
+                    if "[CAPTURE_IMAGE]" in text:
+                        print("\n!!! 撮影トリガーを検出しました !!!")
+                        text = text.replace("[CAPTURE_IMAGE]", "").strip()
+                        
+                        if player:
+                            # 最後のチャンク再生開始時に撮影を実行するように設定
+                            player.on_last_chunk_start = capture_action
+                        else:
+                            # 音声再生がない場合は即座に撮影
+                            capture_action()
+
+                    if player and text:
+                        player.add_text(text)
+
+                if has_received_text:
+                    # 応答テキスト全体を構築して表示 (音声再生完了を待たずに表示)
+                    final_text = "".join(full_response_text).replace("[CAPTURE_IMAGE]", "").strip()
+                    print("\n\n--- [Full Response Captured] ---")
+                    print(final_text)
+                    print("--------------------------------\n")
+
+                    if player:
+                        player.finish()
+                        await asyncio.to_thread(player.wait_done)
+                        print("\n[Gemini] 音声再生が完了しました。")
+
+
+            finally:
+                # ターン終了後、マイクとYOLOを再開
+                self.mic_is_active.set()
+                print("--- Mic resumed ---")
+                if self.yolo_detector:
+                    self.yolo_detector.resume()
+                if player:
+                    player.close()
+
 
     async def run(self):
         """メインのタスクグループを立ち上げる"""
