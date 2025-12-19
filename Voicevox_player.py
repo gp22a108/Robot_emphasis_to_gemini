@@ -311,6 +311,17 @@ def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callabl
             player.close()
 
 
+def play_text_async(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callable[[], None]] = None):
+    """
+    play_textを別スレッドで実行し、メインスレッド（YOLO等）をブロックせずに音声を再生する。
+    """
+    threading.Thread(
+        target=play_text,
+        args=(text, speaker, on_last_chunk_start),
+        daemon=True
+    ).start()
+
+
 def main():
     """テスト用のメイン関数"""
     try:
