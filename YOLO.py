@@ -8,11 +8,6 @@ import sys
 import queue
 import traceback # エラー詳細表示用
 from pathlib import Path
-import psutil # CPU占有率の計測に必要
-
-# OpenVINOのインポート
-import openvino as ov
-from openvino.preprocess import PrePostProcessor, ResizeAlgorithm, ColorFormat
 
 # 設定ファイルをインポート
 import config
@@ -46,6 +41,12 @@ class YOLOOptimizer:
         """
         YOLO検出エンジンの初期化
         """
+        # --- 遅延インポート (起動時間の短縮) ---
+        global ov, PrePostProcessor, ResizeAlgorithm, ColorFormat, psutil
+        import openvino as ov
+        from openvino.preprocess import PrePostProcessor, ResizeAlgorithm, ColorFormat
+        import psutil
+
         self.on_detection = on_detection
         self.input_width, self.input_height = input_size
         self.last_detection_time = 0
@@ -59,9 +60,21 @@ class YOLOOptimizer:
         self.pause_event = threading.Event()
         self.current_frame_for_capture = None
         self.last_person_seen_time = 0.0
+        
+        # Gemini応答保持用
+        self.gemini_response = ""
+        self.voicevox_message = ""
+        self.gemini_lock = threading.Lock()
+
+        # テキスト描画キャッシュ用
+        self.cached_gemini_text = ""
+        self.cached_gemini_lines = []
 
         # 結果受け渡し用キュー (最大サイズを小さくして遅延を防ぐ)
         self.result_queue = queue.Queue(maxsize=2)
+        
+        # 描画用キャッシュ
+        self.latest_results = []
 
         if not os.path.exists(model_path):
             print(f"\n[エラー] モデルファイルが見つかりません: {os.path.abspath(model_path)}")
@@ -72,7 +85,6 @@ class YOLOOptimizer:
         # --- 計測の準備 ---
         p = psutil.Process()
         p.cpu_percent(None)  # 最初の呼び出しは意味のない値を返すことがあるため、一度呼び出しておく
-        time.sleep(0.1) # 少し待ってから計測開始
         total_start_time = time.perf_counter()
         total_start_cpu = time.process_time()
         last_time, last_cpu = total_start_time, total_start_cpu
@@ -232,6 +244,80 @@ class YOLOOptimizer:
             print("Error in callback:")
             traceback.print_exc()
 
+    def set_gemini_response(self, text):
+        """Geminiからの応答テキストを設定する"""
+        with self.gemini_lock:
+            self.gemini_response = text
+
+    def set_voicevox_message(self, text):
+        """Voicevoxの状態メッセージを設定する"""
+        with self.gemini_lock:
+            self.voicevox_message = text
+
+    def _draw_gemini_response(self, frame):
+        """Geminiの応答を画面下部に描画する"""
+        with self.gemini_lock:
+            text = self.gemini_response
+            
+        if not text:
+            return
+
+        h, w = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        thickness = 2
+        color = (255, 255, 255)
+        bg_color = (0, 0, 0)
+        alpha = 0.6
+        margin = 20
+        line_height = 30
+        max_text_width = w - (margin * 2)
+        
+        # --- キャッシュロジックの導入 ---
+        if text == self.cached_gemini_text and self.cached_gemini_lines:
+            lines = self.cached_gemini_lines
+        else:
+            # テキストの折り返し計算
+            lines = []
+            # 改行コードで分割
+            paragraphs = text.split('\n')
+            
+            for paragraph in paragraphs:
+                current_line = ""
+                for char in paragraph:
+                    # 1文字ずつ追加して幅を確認 (日本語非対応のcv2.putTextでは文字化けする可能性があります)
+                    test_line = current_line + char
+                    (text_w, _), _ = cv2.getTextSize(test_line, font, font_scale, thickness)
+                    
+                    if text_w <= max_text_width:
+                        current_line = test_line
+                    else:
+                        lines.append(current_line)
+                        current_line = char
+                if current_line:
+                    lines.append(current_line)
+            
+            # キャッシュ更新
+            self.cached_gemini_text = text
+            self.cached_gemini_lines = lines
+                
+        if not lines:
+            return
+
+        # 背景ボックスの描画
+        box_height = (len(lines) * line_height) + (margin * 2)
+        start_y = h - box_height - 20 # 画面下部から少し浮かす
+        
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (margin, start_y), (w - margin, start_y + box_height), bg_color, -1)
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+        
+        # テキスト描画
+        y = start_y + margin + 20 # ベースライン調整
+        for line in lines:
+            cv2.putText(frame, line, (margin + 10, y), font, font_scale, color, thickness, cv2.LINE_AA)
+            y += line_height
+
     def _draw_results(self, frame, results, process_time_ms):
         """
         描画処理 (メインスレッドで実行)
@@ -275,6 +361,9 @@ class YOLOOptimizer:
             # 最後に人物を見た時刻を更新
             self.last_person_seen_time = current_time
 
+        # Gemini応答の描画
+        self._draw_gemini_response(frame)
+
         # パネル情報更新
         self.frame_count += 1
         elapsed = current_time - self.last_time
@@ -285,7 +374,7 @@ class YOLOOptimizer:
             self.inference_time_ms = process_time_ms
 
         # パネル描画
-        panel_h, panel_w = 110, 240
+        panel_h, panel_w = 160, 240
         overlay = frame.copy()
         cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
@@ -299,6 +388,9 @@ class YOLOOptimizer:
         cv2.putText(frame, f"FPS: {self.fps:.1f}", (20, start_y + 50), font, 0.5, info_color, 1)
         cv2.putText(frame, f"Latency: {self.inference_time_ms:.1f} ms", (20, start_y + 75), font, 0.5, info_color, 1)
         cv2.putText(frame, f"Objects: {detection_count}", (20, start_y + 100), font, 0.5, (0, 255, 0), 1)
+        
+        if self.voicevox_message:
+            cv2.putText(frame, f"Voicevox: {self.voicevox_message}", (20, start_y + 125), font, 0.5, (0, 255, 255), 1)
 
         return frame
 
@@ -341,20 +433,20 @@ class YOLOOptimizer:
                     userdata=(frame, time.time(), h_scale, w_scale)
                 )
 
-                # --- メインスレッドでの描画と表示 ---
+                # --- 結果の取得と更新 ---
                 try:
-                    # 結果の取得（ブロックせず、なければスキップ）
-                    result_data = self.result_queue.get_nowait()
-                    if result_data:
-                        r_frame, r_results, r_time = result_data
-
-                        # ここで描画を行う (安全)
-                        display_frame = self._draw_results(r_frame, r_results, r_time)
-
-                        cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
-
+                    # キューにある最新の結果を取得（溜まっている分はすべて取り出す）
+                    while True:
+                        _, r_results, r_time = self.result_queue.get_nowait()
+                        self.latest_results = r_results
+                        self.inference_time_ms = r_time
                 except queue.Empty:
                     pass
+                
+                # --- 描画と表示 (毎フレーム実行) ---
+                display_frame = frame.copy()
+                self._draw_results(display_frame, self.latest_results, self.inference_time_ms)
+                cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("[終了] ユーザー指示")
