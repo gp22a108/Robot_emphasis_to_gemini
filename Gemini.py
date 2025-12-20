@@ -23,66 +23,39 @@ pip install google-genai opencv-python pyaudio pillow mss aiohttp psutil
 python Gemini.py
 python Gemini.py --mode screen
 """
+from __future__ import annotations
 
 import time
-_t_start = time.perf_counter()
-print(f"[Gemini] プロセス起動。インポートを開始します...")
-
+import sys
+import os
 import asyncio
-import io
 import traceback
 import argparse
+import io
 
-import aiohttp
-import cv2
-print(f"[Gemini] OpenCV/aiohttp インポート完了: {time.perf_counter() - _t_start:.3f}s")
+# 設定ファイル
+import config
 
-import pyaudio
-import PIL.Image
-import mss
-print(f"[Gemini] Audio/Imageライブラリ インポート完了: {time.perf_counter() - _t_start:.3f}s")
+# 遅延インポート用の変数を定義
+genai = None
+types = None
+pyaudio = None
+PIL = None
+mss = None
 
-import config  # 設定ファイル
-
-from google import genai
-from google.genai import types
-print(f"[Gemini] Google GenAI インポート完了 (準備完了): {time.perf_counter() - _t_start:.3f}s")
-
-FORMAT = pyaudio.paInt16
+# 定数定義
+FORMAT = 8 # pyaudio.paInt16 (値は8)
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
-MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
+MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 DEFAULT_MODE = "camera"
 
-client = genai.Client(http_options={"api_version": "v1beta"})
-
-# ネイティブ音声 Live モデル用設定
-CONFIG = {
-    "response_modalities": ["AUDIO"],       # TEXT ではなく AUDIO
-    "output_audio_transcription": {},       # 音声出力を文字起こししてもらう
-}
-
-pya = pyaudio.PyAudio()
-
-
-def list_audio_devices():
-    """デバッグ用: 利用可能なマイク一覧を表示"""
-    print("Available audio input devices:")
-    for i in range(pya.get_device_count()):
-        dev = pya.get_device_info_by_index(i)
-        if dev["maxInputChannels"] > 0:
-            print(f"  Index {i}: {dev['name']}")
-    print("-" * 20)
-    default_dev = pya.get_default_input_device_info()
-    print(
-        f"Default audio input device: "
-        f"Index {default_dev['index']}: {default_dev['name']}"
-    )
-    print("-" * 20)
-
+# クライアント
+client = None
+pya = None
 
 class AudioLoop:
     def __init__(self, video_mode: str = DEFAULT_MODE):
@@ -117,7 +90,7 @@ class AudioLoop:
         self.mic_is_active.set()
 
     @staticmethod
-    def _user_turn(text: str) -> types.Content:
+    def _user_turn(text: str):
         # google-genai 1.55.0 の send_client_content(turns=...) は Content が必要
         return types.Content(
             role="user",
@@ -126,7 +99,6 @@ class AudioLoop:
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
-        print("YOLO detection event received, sending to Gemini.")
         if self.session and self.loop:
             asyncio.run_coroutine_threadsafe(
                 self.session.send_client_content(
@@ -149,6 +121,10 @@ class AudioLoop:
 
     def _get_screen_jpeg_bytes(self) -> bytes:
         """画面キャプチャを 1 フレーム取得して JPEG bytes にする"""
+        # ここでインポートすることで、初期ロード時間を短縮
+        import mss
+        import PIL.Image
+        
         with mss.mss() as sct:
             monitor = sct.monitors[0]
             grabbed = sct.grab(monitor)
@@ -172,15 +148,20 @@ class AudioLoop:
         while True:
             kind, payload = await self.out_queue.get()
 
-            # send_realtime_input は 1 回で 1 引数だけ送る
             if kind == "audio":
                 await self.session.send_realtime_input(audio=payload)
             elif kind == "video":
-                # 静止画フレーム（image/jpeg）を video フレームとして送る
                 await self.session.send_realtime_input(video=payload)
 
     async def listen_audio(self):
         """マイクから音声を取得して out_queue に投入"""
+        global pya, pyaudio
+        
+        # 音声ライブラリの遅延インポート
+        if pyaudio is None:
+            import pyaudio
+            pya = pyaudio.PyAudio()
+
         mic_info = pya.get_default_input_device_info()
         self.audio_stream = await asyncio.to_thread(
             pya.open,
@@ -226,7 +207,6 @@ class AudioLoop:
                     capture_callback_triggered.set()
 
             try:
-                # 1 ターン分のレスポンスストリーム
                 turn = self.session.receive()
                 has_received_text = False
                 full_response_text = []
@@ -234,11 +214,9 @@ class AudioLoop:
                 async for response in turn:
                     text = None
 
-                    # 将来 TEXT モデルを使う場合の互換: response.text
                     if getattr(response, "text", None):
                         text = response.text
 
-                    # native audio + transcription 用
                     server_content = getattr(response, "server_content", None)
                     if server_content is not None:
                         output_tx = getattr(server_content, "output_transcription", None)
@@ -250,7 +228,6 @@ class AudioLoop:
 
                     if not has_received_text:
                         has_received_text = True
-                        # 最初のテキストを受け取ったらマイクを停止し、再生プレーヤーを初期化
                         self.mic_is_active.clear()
                         print("\n--- Mic paused while speaking ---")
                         if self.yolo_detector:
@@ -258,7 +235,7 @@ class AudioLoop:
                         
                         player = VoicevoxStreamPlayer(
                             speaker=config.SPEAKER_ID,
-                            on_last_chunk_start=None # ストリーミング中はコールバックを直接制御
+                            on_last_chunk_start=None
                         )
                         if not player.is_connected:
                             print(f"\n[Warning] Voicevoxへの接続に失敗しました。音声再生をスキップします。")
@@ -266,23 +243,19 @@ class AudioLoop:
 
                     full_response_text.append(text)
                     
-                    # CAPTURE_IMAGEトリガーを検出し、再生用のテキストから削除
                     if "[CAPTURE_IMAGE]" in text:
                         print("\n!!! 撮影トリガーを検出しました !!!")
                         text = text.replace("[CAPTURE_IMAGE]", "").strip()
                         
                         if player:
-                            # 最後のチャンク再生開始時に撮影を実行するように設定
                             player.on_last_chunk_start = capture_action
                         else:
-                            # 音声再生がない場合は即座に撮影
                             capture_action()
 
                     if player and text:
                         player.add_text(text)
 
                 if has_received_text:
-                    # 応答テキスト全体を構築して表示 (音声再生完了を待たずに表示)
                     final_text = "".join(full_response_text).replace("[CAPTURE_IMAGE]", "").strip()
                     print("\n\n--- [Full Response Captured] ---")
                     print(final_text)
@@ -295,7 +268,6 @@ class AudioLoop:
 
 
             finally:
-                # ターン終了後、マイクとYOLOを再開
                 self.mic_is_active.set()
                 print("--- Mic resumed ---")
                 if self.yolo_detector:
@@ -306,20 +278,40 @@ class AudioLoop:
 
     async def run(self):
         """メインのタスクグループを立ち上げる"""
+        global genai, types, client
+        
+        t_start_import = time.perf_counter()
+        print("[Gemini] Google GenAI ライブラリをインポート中...")
+        
+        # 1. Google GenAI (接続に必須) だけ先にインポート
+        from google import genai
+        from google.genai import types
+        
+        print(f"[Gemini] GenAI インポート完了: {time.perf_counter() - t_start_import:.3f}s")
+
+        client = genai.Client(http_options={"api_version": "v1beta"})
+
         self.loop = asyncio.get_running_loop()
         t0 = time.perf_counter()
         c0 = time.process_time()
         try:
-            print("[Gemini] YOLOモジュールを遅延インポート中...")
+            print("[Gemini] YOLOモジュールをインポート中...")
             from YOLO import YOLOOptimizer
-            print(f"[Gemini] YOLOモジュール インポート完了: {time.perf_counter() - _t_start:.3f}s")
+            print(f"[Gemini] YOLOモジュール インポート完了: {time.perf_counter() - t0:.3f}s")
 
-            # YOLO 検出器を初期化して開始
+            # YOLO 検出器を初期化して開始 (裏で初期化が進む)
             self.yolo_detector = YOLOOptimizer(on_detection=self._handle_yolo_detection)
             self.yolo_detector.start()
 
-            live_config = CONFIG.copy()
-            live_config["system_instruction"] = self.system_instruction
+            # ネイティブ音声 Live モデル用設定
+            live_config = {
+                "response_modalities": ["AUDIO"],
+                "output_audio_transcription": {},
+                "system_instruction": self.system_instruction
+            }
+
+            # YOLOの初期化を待たずに接続を開始する
+            # 音声や画像のライブラリは、各タスクが開始された時点でインポートされる
 
             async with (
                 client.aio.live.connect(model=MODEL, config=live_config) as session,
@@ -330,9 +322,9 @@ class AudioLoop:
 
                 send_text_task = tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
-                tg.create_task(self.listen_audio())
+                tg.create_task(self.listen_audio()) # ここでpyaudioインポート
                 if self.video_mode == "screen":
-                    tg.create_task(self.get_screen())
+                    tg.create_task(self.get_screen()) # ここでmss, PILインポート
                 tg.create_task(self.receive_responses())
 
                 await send_text_task

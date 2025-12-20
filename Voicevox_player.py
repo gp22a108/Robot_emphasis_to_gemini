@@ -4,7 +4,6 @@ import queue
 import threading
 import time
 import requests
-import sounddevice as sd
 from concurrent.futures import ThreadPoolExecutor, wait
 import traceback
 from typing import Callable, Optional
@@ -88,13 +87,15 @@ class VoicevoxStreamPlayer:
         self._player_thread = threading.Thread(target=self._playback_worker, daemon=True)
         self._generation_thread = threading.Thread(target=self._generation_worker, daemon=True)
 
+        # 接続確認を非同期で行うか、タイムアウトを短くする
+        # ここではタイムアウトを短くして、失敗したら即座に諦める
         if not self._is_voicevox_running():
             self._executor.shutdown()
             return
 
         self._player_thread.start()
         self._generation_thread.start()
-        self._playback_ready.wait(timeout=5.0)
+        self._playback_ready.wait(timeout=2.0) # タイムアウトを短縮
         
         # 再生スレッドが正常に開始したか確認
         if not self._playback_ready.is_set() or not self._player_thread.is_alive():
@@ -107,9 +108,10 @@ class VoicevoxStreamPlayer:
     def _is_voicevox_running(self) -> bool:
         """Voicevoxエンジンが起動しているか確認する"""
         try:
-            response = self._session.get(f"{BASE_URL}/version", timeout=2)
+            # タイムアウトを短く設定
+            response = self._session.get(f"{BASE_URL}/version", timeout=0.5)
             response.raise_for_status()
-            print(f"[Voicevox] エンジン接続成功 (Version: {response.text})")
+            # print(f"[Voicevox] エンジン接続成功 (Version: {response.text})")
             return True
         except requests.exceptions.RequestException:
             print(f"\n[Voicevox Error] Voicevoxエンジンに接続できません。URL: {BASE_URL}")
@@ -117,6 +119,9 @@ class VoicevoxStreamPlayer:
 
     def _playback_worker(self):
         """音声データをキューから受け取り再生するワーカー"""
+        # 遅延インポート: sounddeviceは初期化に時間がかかる場合があるため
+        import sounddevice as sd
+
         stream = None
         try:
             stream = sd.RawOutputStream(

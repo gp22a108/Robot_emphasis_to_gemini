@@ -1,4 +1,3 @@
-import cv2
 import time
 import os
 
@@ -10,6 +9,9 @@ def take_picture(frame, delay_seconds=0):
         frame: 保存する画像フレーム。
         delay_seconds (int): 撮影までの待機時間（秒）。
     """
+    # 遅延インポート
+    import cv2
+
     if frame is None:
         print("フレームが提供されなかったため、写真を撮影できませんでした。")
         return

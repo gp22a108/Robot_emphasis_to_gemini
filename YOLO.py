@@ -1,53 +1,47 @@
 
-import cv2
 import time
-import numpy as np
 import threading
 import os
 import sys
 import queue
-import traceback # エラー詳細表示用
+import traceback
 from pathlib import Path
 
 # 設定ファイルをインポート
 import config
 
 # ==========================================
-# 設定パラメータ (Configuration)
+# 遅延読み込み用のグローバル変数
 # ==========================================
-MODEL_PATH = config.MODEL_PATH
-DEVICE_NAME = config.DEVICE_NAME
-CACHE_DIR = config.CACHE_DIR
-MODEL_INPUT_SIZE = config.MODEL_INPUT_SIZE
-
-# 検出パラメータ
-CONFIDENCE_THRESHOLD = config.CONFIDENCE_THRESHOLD
-NMS_THRESHOLD = config.NMS_THRESHOLD
-DETECTION_INTERVAL = config.DETECTION_INTERVAL
-
-CLASSES = config.CLASSES
+cv2 = None
+np = None
+ov = None
+PrePostProcessor = None
+ResizeAlgorithm = None
+ColorFormat = None
+psutil = None
 
 def measure_and_print(step_name, start_time, start_cpu, process):
     """処理時間とCPU占有率を計測して表示するヘルパー関数"""
     elapsed_wall = time.perf_counter() - start_time
     elapsed_cpu = time.process_time() - start_cpu
-    # interval=Noneで非ブロッキング。ただし2回目以降の呼び出しで意味のある値
+    # interval=Noneで非ブロッキング
     cpu_percent = process.cpu_percent(interval=None)
     print(f"  -> 計測({step_name}): wall={elapsed_wall:.3f}s, cpu={elapsed_cpu:.3f}s, cpu%={cpu_percent:.1f}%")
     return time.perf_counter(), time.process_time()
 
 class YOLOOptimizer:
-    def __init__(self, model_path=MODEL_PATH, device_name=DEVICE_NAME, cache_dir=CACHE_DIR, input_size=MODEL_INPUT_SIZE, on_detection=None):
+    def __init__(self, model_path=config.MODEL_PATH, device_name=config.DEVICE_NAME, cache_dir=config.CACHE_DIR, input_size=config.MODEL_INPUT_SIZE, on_detection=None):
         """
         YOLO検出エンジンの初期化
+        ここでは重い処理を行わず、run()メソッド内で初期化を行います。
         """
-        # --- 遅延インポート (起動時間の短縮) ---
-        global ov, PrePostProcessor, ResizeAlgorithm, ColorFormat, psutil
-        import openvino as ov
-        from openvino.preprocess import PrePostProcessor, ResizeAlgorithm, ColorFormat
-        import psutil
-
+        self.model_path = model_path
+        self.device_name = device_name
+        self.cache_dir = cache_dir
+        self.input_size = input_size
         self.on_detection = on_detection
+        
         self.input_width, self.input_height = input_size
         self.last_detection_time = 0
         self.lock = threading.Lock()
@@ -60,6 +54,7 @@ class YOLOOptimizer:
         self.pause_event = threading.Event()
         self.current_frame_for_capture = None
         self.last_person_seen_time = 0.0
+        self.is_ready_event = threading.Event() # 初期化完了フラグ
         
         # Gemini応答保持用
         self.gemini_response = ""
@@ -70,76 +65,82 @@ class YOLOOptimizer:
         self.cached_gemini_text = ""
         self.cached_gemini_lines = []
 
-        # 結果受け渡し用キュー (最大サイズを小さくして遅延を防ぐ)
+        # 結果受け渡し用キュー
         self.result_queue = queue.Queue(maxsize=2)
         
         # 描画用キャッシュ
         self.latest_results = []
+        
+        # OpenVINO関連オブジェクト (run内で初期化)
+        self.core = None
+        self.model = None
+        self.compiled_model = None
+        self.infer_queue = None
 
-        if not os.path.exists(model_path):
-            print(f"\n[エラー] モデルファイルが見つかりません: {os.path.abspath(model_path)}")
-            print("以下のコマンドを実行してモデルをエクスポートしてください:")
-            print("  yolo export model=yolov12n.pt format=openvino\n")
-            raise FileNotFoundError(f"Model not found at {model_path}")
+    def is_ready(self):
+        """初期化が完了したかどうかを返す"""
+        return self.is_ready_event.is_set()
+
+    def _initialize_dependencies(self):
+        """依存ライブラリとモデルの初期化（別スレッドで実行）"""
+        global cv2, np, ov, PrePostProcessor, ResizeAlgorithm, ColorFormat, psutil
+        
+        if cv2 is not None:
+            return
+
+        print("[YOLO] ライブラリを読み込んでいます...")
+        t_start = time.perf_counter()
+        
+        import cv2
+        import numpy as np
+        import openvino as ov
+        from openvino.preprocess import PrePostProcessor, ResizeAlgorithm, ColorFormat
+        import psutil
+        
+        print(f"[YOLO] ライブラリ読み込み完了: {time.perf_counter() - t_start:.3f}s")
+
+        if not os.path.exists(self.model_path):
+            print(f"\n[エラー] モデルファイルが見つかりません: {os.path.abspath(self.model_path)}")
+            raise FileNotFoundError(f"Model not found at {self.model_path}")
 
         # --- 計測の準備 ---
         p = psutil.Process()
-        p.cpu_percent(None)  # 最初の呼び出しは意味のない値を返すことがあるため、一度呼び出しておく
+        p.cpu_percent(None)
         total_start_time = time.perf_counter()
         total_start_cpu = time.process_time()
         last_time, last_cpu = total_start_time, total_start_cpu
-        # --- 計測開始 ---
 
-        print("[初期化] OpenVINO Runtimeを起動中...")
+        print("[YOLO] OpenVINO Runtimeを起動中...")
         self.core = ov.Core()
         last_time, last_cpu = measure_and_print("OpenVINO Runtime起動", last_time, last_cpu, p)
 
-        # ログ追加: 認識されているデバイス一覧を表示
-        # print(f"[情報] 利用可能なOpenVINOデバイス: {self.core.available_devices}")
-        # last_time, last_cpu = measure_and_print("利用可能デバイス取得", last_time, last_cpu, p)
-
-        cache_path = Path(cache_dir)
+        cache_path = Path(self.cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
         self.core.set_property({ov.properties.cache_dir: str(cache_path)})
-        print(f"[情報] モデルキャッシュを有効化: {cache_path}")
-        last_time, last_cpu = measure_and_print("モデルキャッシュ有効化", last_time, last_cpu, p)
-
-        # GPU利用時の最適化設定
-        if "GPU" in device_name or "AUTO" in device_name:
-            self.core.set_property(device_name, {
+        
+        if "GPU" in self.device_name or "AUTO" in self.device_name:
+            self.core.set_property(self.device_name, {
                 ov.properties.hint.performance_mode: ov.properties.hint.PerformanceMode.THROUGHPUT
             })
 
-        print(f"[情報] モデルを読み込んでいます: {model_path}")
-        self.model = self.core.read_model(model_path)
+        print(f"[YOLO] モデルを読み込んでいます: {self.model_path}")
+        self.model = self.core.read_model(self.model_path)
         last_time, last_cpu = measure_and_print("モデル読み込み", last_time, last_cpu, p)
 
         self._setup_preprocessing()
         last_time, last_cpu = measure_and_print("前処理プロセス統合", last_time, last_cpu, p)
 
-        print(f"[情報] モデルをデバイス({device_name})向けにコンパイル中...")
-        try:
-            self.compiled_model = self.core.compile_model(self.model, device_name)
-        except Exception as e:
-            print(f"[エラー] モデルのコンパイルに失敗しました。\n詳細: {e}")
-            print("ヒント: GPUドライバが古い場合や、デバイス名が異なる可能性があります。")
-            raise
+        print(f"[YOLO] モデルをデバイス({self.device_name})向けにコンパイル中...")
+        self.compiled_model = self.core.compile_model(self.model, self.device_name)
         last_time, last_cpu = measure_and_print("モデルコンパイル", last_time, last_cpu, p)
 
         self.infer_queue = ov.AsyncInferQueue(self.compiled_model, jobs=0)
         self.infer_queue.set_callback(self._completion_callback)
-
-        num_jobs = len(self.infer_queue) if hasattr(self.infer_queue, '__len__') else self.infer_queue.jobs_number
-        print(f"[情報] 非同期推論キューを初期化完了 (並列ジョブ数: {num_jobs})")
-        last_time, last_cpu = measure_and_print("非同期推論キュー初期化", last_time, last_cpu, p)
         
-        # --- 全体の計測結果 ---
         measure_and_print("初期化全体", total_start_time, total_start_cpu, p)
+        self.is_ready_event.set() # 初期化完了を通知
 
     def _setup_preprocessing(self):
-        """
-        モデルに入力する前の画像処理定義
-        """
         ppp = PrePostProcessor(self.model)
         input_layer = self.model.input(0)
         input_tensor_name = input_layer.any_name
@@ -157,52 +158,29 @@ class YOLOOptimizer:
             .scale([255.0, 255.0, 255.0])
 
         ppp.input(input_tensor_name).model().set_layout(ov.Layout('NCHW'))
-
-        print("[情報] 前処理プロセスをモデルに統合しました")
         self.model = ppp.build()
 
     def _completion_callback(self, request, userdata):
-        """
-        推論完了コールバック (別スレッド)
-        注意: ここでは描画処理(cv2.rectangle等)は行いません。計算結果のみを返します。
-        """
         try:
             original_frame, start_time, h_scale, w_scale = userdata
-
             inference_end_time = time.time()
             process_time_ms = (inference_end_time - start_time) * 1000
 
             output_tensor = request.get_output_tensor(0).data
-
-            # --- 出力テンソルの形状調整 ---
-            # output_tensorの形状は通常 (1, 84, 8400) = (Batch, 4+Classes, Anchors)
-            # これを (8400, 84) = (Anchors, 4+Classes) の2次元配列に直す必要があります
-
-            # 1. バッチ次元を削除: (1, 84, 8400) -> (84, 8400)
             if output_tensor.ndim == 3:
                 output_tensor = output_tensor[0]
 
-            # 2. 転置して (行=アンカー, 列=属性) の形にする: (84, 8400) -> (8400, 84)
             detections = np.transpose(output_tensor)
-
-            # --- NumPyを使った高速フィルタリング ---
-
-            # 1. 各ボックスの最大クラススコアを取得 (4列目以降がクラススコア)
-            # detections[:, 4:] は (8400, 80)
-            scores = np.max(detections[:, 4:], axis=1) # -> (8400,) の1次元配列
-
-            # 2. しきい値(CONFIDENCE_THRESHOLD)以下をカット
-            mask = scores > CONFIDENCE_THRESHOLD # -> (8400,) の1次元ブール配列
-
-            # detections (8400, 84) に対し mask (8400,) で行を抽出
+            scores = np.max(detections[:, 4:], axis=1)
+            mask = scores > config.CONFIDENCE_THRESHOLD
+            
             filtered_detections = detections[mask]
             filtered_scores = scores[mask]
 
-            results = [] # 検出結果のリスト
-
+            results = []
             if len(filtered_detections) > 0:
                 filtered_class_ids = np.argmax(filtered_detections[:, 4:], axis=1)
-
+                
                 cx = filtered_detections[:, 0]
                 cy = filtered_detections[:, 1]
                 w = filtered_detections[:, 2]
@@ -217,45 +195,36 @@ class YOLOOptimizer:
                 confidences = filtered_scores.tolist()
                 class_ids = filtered_class_ids.tolist()
 
-                # NMS
-                indices = cv2.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_THRESHOLD, NMS_THRESHOLD)
+                indices = cv2.dnn.NMSBoxes(boxes, confidences, config.CONFIDENCE_THRESHOLD, config.NMS_THRESHOLD)
 
                 if len(indices) > 0:
                     for i in indices.flatten():
-                        # 結果を辞書形式で保存
                         results.append({
                             'box': boxes[i],
                             'confidence': confidences[i],
                             'class_id': class_ids[i]
                         })
 
-            # 計算結果をメインスレッドへ送信
-            # キューが一杯なら古いものを捨てて最新を入れる
             if self.result_queue.full():
                 try:
                     self.result_queue.get_nowait()
                 except queue.Empty:
                     pass
-
             self.result_queue.put((original_frame, results, process_time_ms))
 
         except Exception:
-            # コールバック内でのエラーはキャッチしないとプロセスごと落ちる(0xC0000409)
             print("Error in callback:")
             traceback.print_exc()
 
     def set_gemini_response(self, text):
-        """Geminiからの応答テキストを設定する"""
         with self.gemini_lock:
             self.gemini_response = text
 
     def set_voicevox_message(self, text):
-        """Voicevoxの状態メッセージを設定する"""
         with self.gemini_lock:
             self.voicevox_message = text
 
     def _draw_gemini_response(self, frame):
-        """Geminiの応答を画面下部に描画する"""
         with self.gemini_lock:
             text = self.gemini_response
             
@@ -273,22 +242,16 @@ class YOLOOptimizer:
         line_height = 30
         max_text_width = w - (margin * 2)
         
-        # --- キャッシュロジックの導入 ---
         if text == self.cached_gemini_text and self.cached_gemini_lines:
             lines = self.cached_gemini_lines
         else:
-            # テキストの折り返し計算
             lines = []
-            # 改行コードで分割
             paragraphs = text.split('\n')
-            
             for paragraph in paragraphs:
                 current_line = ""
                 for char in paragraph:
-                    # 1文字ずつ追加して幅を確認 (日本語非対応のcv2.putTextでは文字化けする可能性があります)
                     test_line = current_line + char
                     (text_w, _), _ = cv2.getTextSize(test_line, font, font_scale, thickness)
-                    
                     if text_w <= max_text_width:
                         current_line = test_line
                     else:
@@ -296,53 +259,44 @@ class YOLOOptimizer:
                         current_line = char
                 if current_line:
                     lines.append(current_line)
-            
-            # キャッシュ更新
             self.cached_gemini_text = text
             self.cached_gemini_lines = lines
                 
         if not lines:
             return
 
-        # 背景ボックスの描画
         box_height = (len(lines) * line_height) + (margin * 2)
-        start_y = h - box_height - 20 # 画面下部から少し浮かす
+        start_y = h - box_height - 20
         
         overlay = frame.copy()
         cv2.rectangle(overlay, (margin, start_y), (w - margin, start_y + box_height), bg_color, -1)
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
         
-        # テキスト描画
-        y = start_y + margin + 20 # ベースライン調整
+        y = start_y + margin + 20
         for line in lines:
             cv2.putText(frame, line, (margin + 10, y), font, font_scale, color, thickness, cv2.LINE_AA)
             y += line_height
 
     def _draw_results(self, frame, results, process_time_ms):
-        """
-        描画処理 (メインスレッドで実行)
-        """
         PERSON_HEIGHT_THRESHOLD = 360
         current_time = time.time()
         detection_count = len(results)
         best_h = 0
         person_center_x = None
 
-        # 物体の描画
         for res in results:
             x, y, w, h = res['box']
             confidence = res['confidence']
             class_id = res['class_id']
-            label = CLASSES.get(class_id, 'Unknown')
+            label = config.CLASSES.get(class_id, 'Unknown')
 
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
                 if h > best_h:
                     best_h = h
                     person_center_x = x + w / 2
 
-            # 通知ロジック
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
-                if (current_time - self.last_detection_time) > DETECTION_INTERVAL:
+                if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
                     print(f" >> 通知: 大きな人物を検出しました (高さ: {h}px)")
                     if self.on_detection:
                         self.on_detection()
@@ -358,13 +312,10 @@ class YOLOOptimizer:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
         if best_h > 0 and person_center_x is not None:
-            # 最後に人物を見た時刻を更新
             self.last_person_seen_time = current_time
 
-        # Gemini応答の描画
         self._draw_gemini_response(frame)
 
-        # パネル情報更新
         self.frame_count += 1
         elapsed = current_time - self.last_time
         if elapsed >= 1.0:
@@ -373,7 +324,6 @@ class YOLOOptimizer:
             self.last_time = current_time
             self.inference_time_ms = process_time_ms
 
-        # パネル描画
         panel_h, panel_w = 160, 240
         overlay = frame.copy()
         cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h), (0, 0, 0), -1)
@@ -384,7 +334,7 @@ class YOLOOptimizer:
         start_y = 35
 
         cv2.putText(frame, f"YOLOv12 OpenVINO", (20, start_y), font, 0.6, (0, 255, 255), 2)
-        cv2.putText(frame, f"Device: {DEVICE_NAME}", (20, start_y + 25), font, 0.5, info_color, 1)
+        cv2.putText(frame, f"Device: {self.device_name}", (20, start_y + 25), font, 0.5, info_color, 1)
         cv2.putText(frame, f"FPS: {self.fps:.1f}", (20, start_y + 50), font, 0.5, info_color, 1)
         cv2.putText(frame, f"Latency: {self.inference_time_ms:.1f} ms", (20, start_y + 75), font, 0.5, info_color, 1)
         cv2.putText(frame, f"Objects: {detection_count}", (20, start_y + 100), font, 0.5, (0, 255, 0), 1)
@@ -395,21 +345,19 @@ class YOLOOptimizer:
         return frame
 
     def run(self, source=0):
-        """
-        メイン実行ループ
-        """
-        cap = cv2.VideoCapture(source)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-        if not cap.isOpened():
-            print("[エラー] カメラを開けませんでした。")
-            return
-
-        print("\n[開始] 推論ループを開始します。")
-        print("  - 'q' キー: 終了")
-
         try:
+            self._initialize_dependencies()
+            
+            cap = cv2.VideoCapture(source)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+            if not cap.isOpened():
+                print("[エラー] カメラを開けませんでした。")
+                return
+
+            print("\n[開始] 推論ループを開始します。")
+            
             while not self.stop_event.is_set():
                 if self.pause_event.is_set():
                     time.sleep(0.1)
@@ -433,9 +381,7 @@ class YOLOOptimizer:
                     userdata=(frame, time.time(), h_scale, w_scale)
                 )
 
-                # --- 結果の取得と更新 ---
                 try:
-                    # キューにある最新の結果を取得（溜まっている分はすべて取り出す）
                     while True:
                         _, r_results, r_time = self.result_queue.get_nowait()
                         self.latest_results = r_results
@@ -443,7 +389,6 @@ class YOLOOptimizer:
                 except queue.Empty:
                     pass
                 
-                # --- 描画と表示 (毎フレーム実行) ---
                 display_frame = frame.copy()
                 self._draw_results(display_frame, self.latest_results, self.inference_time_ms)
                 cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
@@ -452,33 +397,33 @@ class YOLOOptimizer:
                     print("[終了] ユーザー指示")
                     break
 
-        except KeyboardInterrupt:
-            print("\n[終了] Ctrl+C")
+        except Exception as e:
+            print(f"[YOLO Error] {e}")
+            traceback.print_exc()
         finally:
             print("[待機] 推論タスク完了待ち...")
-            self.infer_queue.wait_all()
-            cap.release()
-            cv2.destroyAllWindows()
-            print("[完了] 終了しました")
+            if self.infer_queue:
+                self.infer_queue.wait_all()
+            if 'cap' in locals() and cap:
+                cap.release()
+            if cv2:
+                cv2.destroyAllWindows()
+            print("[YOLO] 終了しました")
 
     def get_current_frame(self):
-        """現在のフレームを返します。"""
         return self.current_frame_for_capture
 
     def pause(self):
-        """スレッドを一時停止します。"""
         if not self.pause_event.is_set():
             print("[YOLO] 一時停止します。")
             self.pause_event.set()
 
     def resume(self):
-        """スレッドを再開します。"""
         if self.pause_event.is_set():
             print("[YOLO] 再開します。")
             self.pause_event.clear()
 
     def start(self):
-        """スレッドを開始します。"""
         if self.thread is None:
             self.stop_event.clear()
             self.thread = threading.Thread(target=self.run, daemon=True)
@@ -486,11 +431,10 @@ class YOLOOptimizer:
             print("[YOLO] スレッドを開始しました。")
 
     def stop(self):
-        """スレッドを停止します。"""
         if self.thread and self.thread.is_alive():
             print("[YOLO] 停止シグナルを送信します...")
             self.stop_event.set()
-            self.thread.join(timeout=5) # タイムアウトを5秒に設定
+            self.thread.join(timeout=5)
             if self.thread.is_alive():
                 print("[YOLO] スレッドの停止に失敗しました。")
             else:
@@ -501,21 +445,15 @@ def simple_callback():
     pass
 
 def main():
-    if not os.path.exists(MODEL_PATH):
-        print(f"[エラー] {MODEL_PATH} がありません")
+    if not os.path.exists(config.MODEL_PATH):
+        print(f"[エラー] {config.MODEL_PATH} がありません")
         return
 
     try:
         optimizer = YOLOOptimizer(
-            model_path=MODEL_PATH,
-            device_name=DEVICE_NAME,
-            cache_dir=CACHE_DIR,
-            input_size=MODEL_INPUT_SIZE,
             on_detection=simple_callback
         )
         optimizer.start()
-        # メインスレッドはここで待機するか、他の処理を行う
-        # このサンプルでは、Enterキーが押されるまで待機
         input("Enterキーを押すと終了します...\n")
     except Exception as e:
         print(f"[致命的エラー]:\n{e}")

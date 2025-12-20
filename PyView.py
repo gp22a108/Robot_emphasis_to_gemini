@@ -16,7 +16,10 @@ class ModernImageGridApp(ctk.CTk):
         self.geometry("1000x800")
 
         # 監視対象設定
-        self.target_folder = os.path.join(os.getcwd(), "captures")
+        # このスクリプトのディレクトリを取得
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.target_folder = os.path.join(script_dir, "captures")
+
         self.last_files_set = set()
         self.image_refs = []
         self.card_frames = []
