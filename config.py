@@ -48,7 +48,7 @@ SPEED_SCALE = 1.2
 # VOICEVOXのベースURL
 BASE_URL = "http://127.0.0.1:50121"
 # リクエストのタイムアウト（秒）
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 30
 # サンプルレート
 SAMPLE_RATE = 24000
 # チャンネル数

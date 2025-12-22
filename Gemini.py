@@ -218,8 +218,9 @@ class AudioLoop:
                         text = None
                         audio_data = getattr(response, "data", None)
 
-                        if getattr(response, "text", None):
-                            text = response.text
+                        # response.text は thought (思考プロセス) を含む場合があるため使用しない
+                        # if getattr(response, "text", None):
+                        #     text = response.text
 
                         server_content = getattr(response, "server_content", None)
                         if server_content is not None:
@@ -230,6 +231,10 @@ class AudioLoop:
                             model_turn = getattr(server_content, "model_turn", None)
                             if model_turn:
                                 for part in model_turn.parts:
+                                    # 思考プロセス (thought) が含まれている場合はスキップ
+                                    if getattr(part, "thought", None):
+                                        continue
+
                                     if part.text:
                                         text = part.text
                                     if part.inline_data and part.inline_data.mime_type.startswith("audio"):
