@@ -192,88 +192,126 @@ class AudioLoop:
         """Live API からのレスポンスを受信し、テキストを組み立てて処理"""
         from Voicevox_player import VoicevoxStreamPlayer  # 遅延インポート
 
-        while True:
-            player = None
-            capture_callback_triggered = asyncio.Event()
+        audio_out_stream = None
 
-            def capture_action():
-                if not capture_callback_triggered.is_set():
-                    print("--- 写真撮影タスクを非同期で開始します ---")
-                    from Capture import take_picture  # 遅延インポート
+        try:
+            while True:
+                player = None
+                capture_callback_triggered = asyncio.Event()
 
-                    frame_to_capture = self.yolo_detector.get_current_frame()
-                    coro = asyncio.to_thread(take_picture, frame_to_capture, 0)
-                    asyncio.run_coroutine_threadsafe(coro, self.loop)
-                    capture_callback_triggered.set()
+                def capture_action():
+                    if not capture_callback_triggered.is_set():
+                        print("--- 写真撮影タスクを非同期で開始します ---")
+                        from Capture import take_picture  # 遅延インポート
 
-            try:
-                turn = self.session.receive()
-                has_received_text = False
-                full_response_text = []
+                        frame_to_capture = self.yolo_detector.get_current_frame()
+                        coro = asyncio.to_thread(take_picture, frame_to_capture, 0)
+                        asyncio.run_coroutine_threadsafe(coro, self.loop)
+                        capture_callback_triggered.set()
 
-                async for response in turn:
-                    text = None
+                try:
+                    turn = self.session.receive()
+                    has_received_content = False
+                    full_response_text = []
 
-                    if getattr(response, "text", None):
-                        text = response.text
+                    async for response in turn:
+                        text = None
+                        audio_data = getattr(response, "data", None)
 
-                    server_content = getattr(response, "server_content", None)
-                    if server_content is not None:
-                        output_tx = getattr(server_content, "output_transcription", None)
-                        if output_tx is not None and getattr(output_tx, "text", None):
-                            text = output_tx.text
+                        if getattr(response, "text", None):
+                            text = response.text
 
-                    if not text:
-                        continue
+                        server_content = getattr(response, "server_content", None)
+                        if server_content is not None:
+                            output_tx = getattr(server_content, "output_transcription", None)
+                            if output_tx is not None and getattr(output_tx, "text", None):
+                                text = output_tx.text
+                            
+                            model_turn = getattr(server_content, "model_turn", None)
+                            if model_turn:
+                                for part in model_turn.parts:
+                                    if part.text:
+                                        text = part.text
+                                    if part.inline_data and part.inline_data.mime_type.startswith("audio"):
+                                        if audio_data is None:
+                                            audio_data = part.inline_data.data
 
-                    if not has_received_text:
-                        has_received_text = True
-                        self.mic_is_active.clear()
-                        print("\n--- Mic paused while speaking ---")
-                        if self.yolo_detector:
-                            self.yolo_detector.pause()
+                        if not text and not audio_data:
+                            continue
+
+                        if not has_received_content:
+                            has_received_content = True
+                            self.mic_is_active.clear()
+                            print("\n--- Mic paused while speaking ---")
+                            if self.yolo_detector:
+                                self.yolo_detector.pause()
+                            
+                            if config.USE_VOICEVOX:
+                                player = VoicevoxStreamPlayer(
+                                    speaker=config.SPEAKER_ID,
+                                    on_last_chunk_start=None
+                                )
+                                if not player.is_connected:
+                                    print(f"\n[Warning] Voicevoxへの接続に失敗しました。音声再生をスキップします。")
+                                    player = None
+                            else:
+                                # Native Audio Setup
+                                if audio_out_stream is None:
+                                    global pya, pyaudio
+                                    if pyaudio is None:
+                                        import pyaudio
+                                        pya = pyaudio.PyAudio()
+                                    
+                                    audio_out_stream = await asyncio.to_thread(
+                                        pya.open,
+                                        format=pyaudio.paInt16,
+                                        channels=CHANNELS,
+                                        rate=RECEIVE_SAMPLE_RATE,
+                                        output=True
+                                    )
+
+                        if text:
+                            full_response_text.append(text)
+                            clean_text = text.replace("[CAPTURE_IMAGE]", "")
+                            if config.USE_VOICEVOX and player and clean_text:
+                                player.add_text(clean_text)
                         
-                        player = VoicevoxStreamPlayer(
-                            speaker=config.SPEAKER_ID,
-                            on_last_chunk_start=None
-                        )
-                        if not player.is_connected:
-                            print(f"\n[Warning] Voicevoxへの接続に失敗しました。音声再生をスキップします。")
-                            player = None
+                        if not config.USE_VOICEVOX and audio_out_stream and audio_data:
+                            await asyncio.to_thread(audio_out_stream.write, audio_data)
 
-                    full_response_text.append(text)
-                    
-                    if "[CAPTURE_IMAGE]" in text:
-                        print("\n!!! 撮影トリガーを検出しました !!!")
-                        text = text.replace("[CAPTURE_IMAGE]", "").strip()
+                    # --- TURN IS COMPLETE ---
+                    if has_received_content:
+                        final_text = "".join(full_response_text)
                         
-                        if player:
-                            player.on_last_chunk_start = capture_action
-                        else:
-                            capture_action()
+                        # 確定した最終テキストにトリガーが含まれているか確認
+                        if "[CAPTURE_IMAGE]" in final_text:
+                            print("\n!!! 撮影トリガーを検出しました !!!")
+                            if config.USE_VOICEVOX and player:
+                                player.on_last_chunk_start = capture_action
+                            else:
+                                # Voicevox以外（ネイティブ音声など）の場合は即時実行
+                                capture_action()
+                        
+                        final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").strip()
+                        print("\n\n--- [Full Response Captured] ---")
+                        print(final_text_for_display)
+                        print("--------------------------------\n")
 
-                    if player and text:
-                        player.add_text(text)
+                        if config.USE_VOICEVOX and player:
+                            player.finish()
+                            await asyncio.to_thread(player.wait_done)
+                            print("\n[Gemini] 音声再生が完了しました。")
 
-                if has_received_text:
-                    final_text = "".join(full_response_text).replace("[CAPTURE_IMAGE]", "").strip()
-                    print("\n\n--- [Full Response Captured] ---")
-                    print(final_text)
-                    print("--------------------------------\n")
-
+                finally:
+                    self.mic_is_active.set()
+                    print("--- Mic resumed ---")
+                    if self.yolo_detector:
+                        self.yolo_detector.resume()
                     if player:
-                        player.finish()
-                        await asyncio.to_thread(player.wait_done)
-                        print("\n[Gemini] 音声再生が完了しました。")
-
-
-            finally:
-                self.mic_is_active.set()
-                print("--- Mic resumed ---")
-                if self.yolo_detector:
-                    self.yolo_detector.resume()
-                if player:
-                    player.close()
+                        player.close()
+        finally:
+            if audio_out_stream:
+                audio_out_stream.close()
 
 
     async def run(self):
@@ -304,11 +342,17 @@ class AudioLoop:
             self.yolo_detector.start()
 
             # ネイティブ音声 Live モデル用設定
+            # Voicevox使用時でも、テキスト(トランスクリプト)を取得するために output_audio_transcription が必要。
+            # また、TEXTモードのみにするとエラーになる場合があるため、常にAUDIOモードで接続し、
+            # クライアント側で音声データの使用/不使用を切り替える。
+            response_modalities = ["AUDIO"]
             live_config = {
-                "response_modalities": ["AUDIO"],
+                "response_modalities": response_modalities,
                 "output_audio_transcription": {},
                 "system_instruction": self.system_instruction
             }
+
+            print(f"[Gemini] Audio Output Mode: {'VOICEVOX' if config.USE_VOICEVOX else 'GEMINI NATIVE'}")
 
             # YOLOの初期化を待たずに接続を開始する
             # 音声や画像のライブラリは、各タスクが開始された時点でインポートされる
