@@ -67,9 +67,9 @@ class AudioLoop:
         - まず初めにカメラを見てユーザーの服装や身につけているものを見て褒めてください。その後にストリートスナップスナップやっていることを説明してください。
         - 最後に写真を取るように誘導してください。
         - だいたい会話が３往復目くらいで写真撮影してください。
-        - 質問の後は会話を無理やり続けないでください。
+        - 質問の後は会話を無理やり続けない。
         - 少し一つの会話の長さ控えめで
-        - 写真撮影の同意を取ってください。
+        - 必ず、写真撮影の同意を取ってください。
 
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
@@ -87,7 +87,8 @@ class AudioLoop:
         self.audio_stream = None
 
         self.mic_is_active = asyncio.Event()
-        self.mic_is_active.set()
+        # self.mic_is_active.set()
+        print("[Gemini] Microphone initialized in MUTE state.")
 
     @staticmethod
     def _user_turn(text: str):
