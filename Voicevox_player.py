@@ -66,9 +66,10 @@ def _create_chunks(text: str) -> list[str]:
 
 
 class VoicevoxStreamPlayer:
-    def __init__(self, speaker: int, on_last_chunk_start: Optional[Callable[[], None]] = None):
+    def __init__(self, speaker: int, on_last_chunk_start: Optional[Callable[[], None]] = None, on_play_start: Optional[Callable[[], None]] = None):
         self.speaker = speaker
         self.on_last_chunk_start = on_last_chunk_start
+        self.on_play_start = on_play_start
         self.is_connected = False
         self._text_buffer = ""  # ストリーミング用テキストバッファ
 
@@ -82,6 +83,7 @@ class VoicevoxStreamPlayer:
         self._is_generation_finished = False
         self._total_chunks_added = 0
         self._last_chunk_callback_triggered = threading.Event()
+        self._play_start_triggered = False
 
         self._playback_ready = threading.Event()
         self._player_thread = threading.Thread(target=self._playback_worker, daemon=True)
@@ -104,6 +106,11 @@ class VoicevoxStreamPlayer:
             return
         
         self.is_connected = True
+
+    @property
+    def has_started_playing(self) -> bool:
+        """再生が開始されたかどうかを返す"""
+        return self._play_start_triggered
 
     def _is_voicevox_running(self) -> bool:
         """Voicevoxエンジンが起動しているか確認する"""
@@ -134,12 +141,25 @@ class VoicevoxStreamPlayer:
             while True:
                 item = self._audio_queue.get()
                 if item is None:
+                    # 終了時にまだトリガーされていなければ実行 (Fallback)
+                    if self.on_last_chunk_start and not self._last_chunk_callback_triggered.is_set():
+                         print("\n--- 全再生終了、コールバックをトリガー(Fallback) ---")
+                         self.on_last_chunk_start()
+                         self._last_chunk_callback_triggered.set()
+
                     self._audio_queue.task_done()
                     break
                 
                 try:
                     index, pcm_data = item
                     
+                    if not self._play_start_triggered and pcm_data:
+                        self._play_start_triggered = True
+                        if self.on_play_start:
+                            print("\n--- 再生開始、コールバックをトリガー ---")
+                            self.on_play_start()
+
+                    # 再生前チェック
                     if self.on_last_chunk_start and self._is_generation_finished and index == self._total_chunks_added - 1:
                         if not self._last_chunk_callback_triggered.is_set():
                             print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
@@ -148,6 +168,14 @@ class VoicevoxStreamPlayer:
 
                     if pcm_data:
                         stream.write(pcm_data)
+
+                    # 再生後チェック (再生中に finish() が呼ばれた場合など)
+                    if self.on_last_chunk_start and self._is_generation_finished and index == self._total_chunks_added - 1:
+                        if not self._last_chunk_callback_triggered.is_set():
+                            print("\n--- 最後のチャンクの再生完了、コールバックをトリガー(Post-play) ---")
+                            self.on_last_chunk_start()
+                            self._last_chunk_callback_triggered.set()
+
                 except Exception as e:
                     print(f"\n[Voicevox Error] 再生中のエラー: {e}")
                 finally:
@@ -281,6 +309,9 @@ class VoicevoxStreamPlayer:
         self._audio_queue.put(None)
         if self._player_thread and self._player_thread.is_alive():
             self._player_thread.join()
+        
+        # 再生終了後、少し待機して余韻を持たせる
+        # time.sleep(0.5) # 遅延を削除
 
     def close(self):
         """リソースを解放する"""

@@ -7,16 +7,42 @@ import json # jsonモジュールをインポート
 from socketserver import ThreadingMixIn
 
 # --- グローバル変数 ---
-pose_data = {
-    "CSotaMotion.SV_R_SHOULDER": 0,
+pose_data_default = {   #デフォルトのポーズ
+    "CSotaMotion.SV_R_SHOULDER": 700,
     "CSotaMotion.SV_R_ELBOW": 0,
-    "CSotaMotion.SV_L_SHOULDER": 0,
-    "CSotaMotion.SV_L_ELBOW": 0,
+    "CSotaMotion.SV_L_SHOULDER": -150,
+    "CSotaMotion.SV_L_ELBOW": -500,
     "CSotaMotion.SV_HEAD_Y": 0,
     "CSotaMotion.SV_HEAD_R": 0,
     "CSotaMotion.SV_BODY_Y": 0,
     "CSotaMotion.SV_HEAD_P": 0,
 }
+
+pose_data_thinking = {   #考え中のポーズ
+    "CSotaMotion.SV_R_SHOULDER": 550,
+    "CSotaMotion.SV_R_ELBOW": 700,
+    "CSotaMotion.SV_L_SHOULDER": -150,
+    "CSotaMotion.SV_L_ELBOW": -580,
+    "CSotaMotion.SV_HEAD_Y": 0,
+    "CSotaMotion.SV_HEAD_R": -300,
+    "CSotaMotion.SV_BODY_Y": 0,
+    "CSotaMotion.SV_HEAD_P": 0, # 少しうつむくなど変化をつける
+}
+
+pose_data_pic = {   #撮影時のポーズ
+    "CSotaMotion.SV_R_SHOULDER": 700,
+    "CSotaMotion.SV_R_ELBOW": 0,
+    "CSotaMotion.SV_L_SHOULDER": 0,
+    "CSotaMotion.SV_L_ELBOW": -700,
+    "CSotaMotion.SV_HEAD_Y": 0,
+    "CSotaMotion.SV_HEAD_R": 550,
+    "CSotaMotion.SV_BODY_Y": 0,
+    "CSotaMotion.SV_HEAD_P": 0,
+}
+
+# 現在のポーズデータを初期化
+pose_data = pose_data_default.copy()
+
 data_lock = threading.Lock()
 
 
@@ -38,6 +64,7 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
 
             print("Client connected for SSE.")
             last_sent_data_str = ""
+            last_heartbeat_time = time.time()
             try:
                 # 接続が続く限りループ
                 while True:
@@ -57,6 +84,13 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                         self.wfile.write(sse_message.encode("utf-8"))
                         self.wfile.flush()
                         last_sent_data_str = current_data_str
+                        last_heartbeat_time = time.time()
+
+                    # 一定時間データ送信がない場合、ハートビートを送信 (3秒間隔)
+                    elif time.time() - last_heartbeat_time > 3.0:
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                        last_heartbeat_time = time.time()
 
                     time.sleep(0.1)
 
@@ -71,6 +105,7 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Not Found\n")
 
     def do_POST(self):
+        global pose_data
         if self.path == '/pose':
             content_length = int(self.headers['Content-Length'])
             post_body = self.rfile.read(content_length)
@@ -79,9 +114,23 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                 received_data = json.loads(post_body)
 
                 with data_lock:
-                    for key, value in received_data.items():
-                        if key in pose_data:
-                            pose_data[key] = value
+                    # モード指定がある場合
+                    if "mode" in received_data:
+                        mode = received_data["mode"]
+                        if mode == "default":
+                            pose_data = pose_data_default.copy()
+                            print("Pose switched to DEFAULT")
+                        elif mode == "thinking":
+                            pose_data = pose_data_thinking.copy()
+                            print("Pose switched to THINKING")
+                        elif mode == "pic":
+                            pose_data = pose_data_pic.copy()
+                            print("Pose switched to PIC")
+                    else:
+                        # 個別の値を更新
+                        for key, value in received_data.items():
+                            if key in pose_data:
+                                pose_data[key] = value
 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')

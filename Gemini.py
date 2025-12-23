@@ -32,6 +32,8 @@ import asyncio
 import traceback
 import argparse
 import io
+import requests
+import json
 
 # 設定ファイル
 import config
@@ -57,12 +59,22 @@ DEFAULT_MODE = "camera"
 client = None
 pya = None
 
+def update_pose(mode):
+    """Http_realtime.py にポーズ変更リクエストを送信する"""
+    try:
+        url = "http://127.0.0.1:8000/pose"
+        data = {"mode": mode}
+        requests.post(url, json=data, timeout=0.5)
+    except Exception as e:
+        print(f"Failed to update pose to {mode}: {e}")
+
 class AudioLoop:
     def __init__(self, video_mode: str = DEFAULT_MODE):
         self.video_mode = video_mode
         self.system_instruction = """### 役割と振る舞い
         - 必ず、テキストを出力してください。
         - ユーザーに対しては、友達のように親しみやすく、少し馴れ馴れしい口調（タメ口など）で接してください。
+        - おじさん(カメラマンの荒木経惟)みたいな感じで。
         - 基本的にすべて日本語で回答してください。
         - まず初めにカメラを見てユーザーの服装や身につけているものを見て褒めてください。その後にストリートスナップスナップやっていることを説明してください。
         - 最後に写真を取るように誘導してください。
@@ -70,16 +82,17 @@ class AudioLoop:
         - 質問の後は会話を無理やり続けない。
         - 少し一つの会話の長さ控えめで
         - 必ず、写真撮影の同意を取ってください。
+        - "今"を"いま"で出力
 
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
 
         1. 撮影の合図となるような、明るい返答をする（例：「いいよ、撮るね！」「はい、チーズ！」「撮るよ～」など）。
-        2. **応答の最後（文末）**に、必ず `[CAPTURE_IMAGE]` という文字列を含める。
+        2. 応答の最初に、必ず `[CAPTURE_IMAGE]` という文字列を含める。
            ※この文字列はシステムがカメラを起動するためのトリガーです。絶対に省略や変更をしないでください。
 
         ### 応答例
-        AI：「オッケー！いい顔してるね〜。はい、とるよー [CAPTURE_IMAGE]」"""
+        AI：「[CAPTURE_IMAGE] オッケー！いい顔してるね〜。はい、とるよー」"""
         self.out_queue: asyncio.Queue | None = None
         self.session = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -199,29 +212,35 @@ class AudioLoop:
             while True:
                 player = None
                 capture_callback_triggered = asyncio.Event()
+                capture_task = None
 
                 def capture_action():
+                    nonlocal capture_task
                     if not capture_callback_triggered.is_set():
                         print("--- 写真撮影タスクを非同期で開始します ---")
-                        from Capture import take_picture  # 遅延インポート
+                        
+                        async def _do_capture():
+                            # 写真撮影時は pose_data_pic に変更
+                            # トリガー検出時に既に変更しているので、ここでは変更しない
+                            # await asyncio.to_thread(update_pose, "pic")
+                            
+                            from Capture import take_picture  # 遅延インポート
+                            frame_to_capture = self.yolo_detector.get_current_frame()
+                            await asyncio.to_thread(take_picture, frame_to_capture, 0)
 
-                        frame_to_capture = self.yolo_detector.get_current_frame()
-                        coro = asyncio.to_thread(take_picture, frame_to_capture, 0)
-                        asyncio.run_coroutine_threadsafe(coro, self.loop)
+                        # メインループで実行するようにスケジュールし、Futureを保存
+                        capture_task = asyncio.run_coroutine_threadsafe(_do_capture(), self.loop)
                         capture_callback_triggered.set()
 
                 try:
                     turn = self.session.receive()
                     has_received_content = False
+                    is_playing = False # 再生が開始されたかを管理するフラグ
                     full_response_text = []
 
                     async for response in turn:
                         text = None
                         audio_data = getattr(response, "data", None)
-
-                        # response.text は thought (思考プロセス) を含む場合があるため使用しない
-                        # if getattr(response, "text", None):
-                        #     text = response.text
 
                         server_content = getattr(response, "server_content", None)
                         if server_content is not None:
@@ -232,10 +251,8 @@ class AudioLoop:
                             model_turn = getattr(server_content, "model_turn", None)
                             if model_turn:
                                 for part in model_turn.parts:
-                                    # 思考プロセス (thought) が含まれている場合はスキップ
                                     if getattr(part, "thought", None):
                                         continue
-
                                     if part.text:
                                         text = part.text
                                     if part.inline_data and part.inline_data.mime_type.startswith("audio"):
@@ -249,6 +266,10 @@ class AudioLoop:
                             has_received_content = True
                             self.mic_is_active.clear()
                             print("\n--- Mic paused while speaking ---")
+                            
+                            # Geminiが考え始めたら thinking ポーズへ
+                            await asyncio.to_thread(update_pose, "thinking")
+
                             if self.yolo_detector:
                                 self.yolo_detector.pause()
                             
@@ -275,8 +296,20 @@ class AudioLoop:
                                         rate=RECEIVE_SAMPLE_RATE,
                                         output=True
                                     )
+                        
+                        # 再生すべき最初のコンテンツを受け取った時点で default ポーズへ
+                        if has_received_content and not is_playing:
+                            is_playing = True
+                            await asyncio.to_thread(update_pose, "default")
 
                         if text:
+                            if "[CAPTURE_IMAGE]" in text:
+                                print("\n!!! 撮影トリガーを検出しました (Stream) !!!")
+                                await asyncio.to_thread(update_pose, "pic")
+                                if config.USE_VOICEVOX and player:
+                                    # 最後のチャンク再生時に撮影を実行
+                                    player.on_last_chunk_start = capture_action
+
                             full_response_text.append(text)
                             clean_text = text.replace("[CAPTURE_IMAGE]", "")
                             if config.USE_VOICEVOX and player and clean_text:
@@ -289,13 +322,18 @@ class AudioLoop:
                     if has_received_content:
                         final_text = "".join(full_response_text)
                         
-                        # 確定した最終テキストにトリガーが含まれているか確認
                         if "[CAPTURE_IMAGE]" in final_text:
-                            print("\n!!! 撮影トリガーを検出しました !!!")
+                            # Voicevoxでまだコールバックが設定されていない場合のフォールバック
                             if config.USE_VOICEVOX and player:
-                                player.on_last_chunk_start = capture_action
-                            else:
-                                # Voicevox以外（ネイティブ音声など）の場合は即時実行
+                                if not player.on_last_chunk_start:
+                                    print("\n!!! 撮影トリガーを検出しました (End of Turn - Fallback) !!!")
+                                    await asyncio.to_thread(update_pose, "pic")
+                                    player.on_last_chunk_start = capture_action
+                            
+                            # Native Audioの場合はここで実行 (capture_actionは内部で重複実行防止済み)
+                            elif not config.USE_VOICEVOX:
+                                print("\n!!! 撮影トリガーを検出しました (Native) !!!")
+                                await asyncio.to_thread(update_pose, "pic")
                                 capture_action()
                         
                         final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").strip()
@@ -308,9 +346,19 @@ class AudioLoop:
                             await asyncio.to_thread(player.wait_done)
                             print("\n[Gemini] 音声再生が完了しました。")
 
+                        # 写真撮影タスクが実行中なら完了を待つ
+                        if capture_task:
+                            try:
+                                await asyncio.wrap_future(capture_task)
+                            except Exception as e:
+                                print(f"Capture task failed: {e}")
+
                 finally:
                     self.mic_is_active.set()
                     print("--- Mic resumed ---")
+                    # 全ての処理が終わった後、default ポーズに戻す
+                    await asyncio.to_thread(update_pose, "default")
+
                     if self.yolo_detector:
                         self.yolo_detector.resume()
                     if player:
@@ -327,7 +375,6 @@ class AudioLoop:
         t_start_import = time.perf_counter()
         print("[Gemini] Google GenAI ライブラリをインポート中...")
         
-        # 1. Google GenAI (接続に必須) だけ先にインポート
         from google import genai
         from google.genai import types
         
@@ -343,14 +390,9 @@ class AudioLoop:
             from YOLO import YOLOOptimizer
             print(f"[Gemini] YOLOモジュール インポート完了: {time.perf_counter() - t0:.3f}s")
 
-            # YOLO 検出器を初期化して開始 (裏で初期化が進む)
             self.yolo_detector = YOLOOptimizer(on_detection=self._handle_yolo_detection)
             self.yolo_detector.start()
 
-            # ネイティブ音声 Live モデル用設定
-            # Voicevox使用時でも、テキスト(トランスクリプト)を取得するために output_audio_transcription が必要。
-            # また、TEXTモードのみにするとエラーになる場合があるため、常にAUDIOモードで接続し、
-            # クライアント側で音声データの使用/不使用を切り替える。
             response_modalities = ["AUDIO"]
             live_config = {
                 "response_modalities": response_modalities,
@@ -359,9 +401,6 @@ class AudioLoop:
             }
 
             print(f"[Gemini] Audio Output Mode: {'VOICEVOX' if config.USE_VOICEVOX else 'GEMINI NATIVE'}")
-
-            # YOLOの初期化を待たずに接続を開始する
-            # 音声や画像のライブラリは、各タスクが開始された時点でインポートされる
 
             async with (
                 client.aio.live.connect(model=MODEL, config=live_config) as session,
@@ -372,9 +411,9 @@ class AudioLoop:
 
                 send_text_task = tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
-                tg.create_task(self.listen_audio()) # ここでpyaudioインポート
+                tg.create_task(self.listen_audio())
                 if self.video_mode == "screen":
-                    tg.create_task(self.get_screen()) # ここでmss, PILインポート
+                    tg.create_task(self.get_screen())
                 tg.create_task(self.receive_responses())
 
                 await send_text_task
