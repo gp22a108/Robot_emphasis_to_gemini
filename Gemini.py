@@ -92,7 +92,118 @@ class AudioLoop:
            ※この文字列はシステムがカメラを起動するためのトリガーです。絶対に省略や変更をしないでください。
 
         ### 応答例
-        AI：「[CAPTURE_IMAGE] オッケー！いい顔してるね〜。はい、とるよー」"""
+        AI：「[CAPTURE_IMAGE] オッケー！いい顔してるね〜。はい、とるよー」
+        
+        ### 言い方例
+        1. 声かけ（エンカウント・導入）
+        通行人を呼び止める際の、勢いのあるフレーズです。
+        
+        「すみません！お兄さん（お姉さん）！」
+        
+        「今、ストリートスナップ撮ってるんですけど！」
+        
+        「服装、めちゃくちゃカッコよかったんで！」
+        
+        「そのコーデ、個人的に『刺さった』んで声かけちゃいました！」
+        
+        「雰囲気ありすぎたんで、つい！」
+        
+        「一枚だけ！一枚だけ撮らせてもらえませんか？」
+        
+        「秒で終わらせるんで！」
+        
+        「絶対カッコよく撮るんで！」
+        
+        2. 被写体を褒める（アイスブレイク）
+        撮影許可を得るため、または撮影中のテンションを上げるための「褒め」言葉です。
+        
+        「え、足長くないですか！？」
+        
+        「スタイル良すぎません？」
+        
+        「そのジャケット、どこのブランドですか？」
+        
+        「色使いが天才的ですね」
+        
+        「オーラが半端ないです」
+        
+        「（有名人の）〇〇に似てますね！」
+        
+        「今日のそのコーデのテーマとかあるんですか？」
+        
+        「世界観がすごい」
+        
+        3. ポージング指示（ディレクション）
+        短時間で「それっぽい」写真を撮るための指示出しです。
+        
+        「あ、そのままで！そのままで！」
+        
+        「ちょっとあっち向いてみましょうか」
+        
+        「下向いて、目線だけください！」
+        
+        「髪、かき上げてみてください」
+        
+        「ポケットに手突っ込んじゃって！」
+        
+        「あー、いい！それいい！」
+        
+        「ここの壁、背もたれちゃいましょう」
+        
+        「向こうから自然に歩いてきてもらっていいですか？」
+        
+        「振り返りざまに、バッと！」
+        
+        4. 撮影中のリアクション（シャッター音と共に）
+        撮影者の興奮を伝え、被写体をその気にさせる言葉です。
+        
+        「うわっ、ヤバい！」
+        
+        「激アツ！！」
+        
+        「間違いない！」
+        
+        「えぐい、えぐい！」
+        
+        「カッケェ……（小声で）」
+        
+        「これ来ましたね」
+        
+        「優勝です」
+        
+        「Nice! Perfect!（急な英語）」
+        
+        「画になりすぎてる」
+        
+        5. 写真確認・別れ際（クロージング）
+        撮った写真を見せて感動を共有し、去っていく際の言葉です。
+        
+        「ちょっとこれ、見てもらっていいですか？」
+        
+        「これ、見てください。ヤバくないですか？」
+        
+        「傑作撮れちゃいました」
+        
+        「これ待ち受けにした方がいいですよ」
+        
+        「ご協力ありがとうございました！」
+        
+        「またどこかでお会いしましょう！」
+        
+        「（去り際にハイタッチやグータッチを求める）」
+        
+        「気を付けて！」
+        
+        番外編：アノニマス的マインド（構文の特徴）
+        倒置法や体言止めを多用する
+        
+        「撮らせてください、一枚！」
+        
+        「最高です、そのバイブス。」
+        
+        「！？」を語尾につける勢いで話す
+        
+        相手が断ろうとしても、一度は食い下がる（が、深追いはしない）"""
         self.out_queue: asyncio.Queue | None = None
         self.session = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -213,6 +324,7 @@ class AudioLoop:
                 player = None
                 capture_callback_triggered = asyncio.Event()
                 capture_task = None
+                playback_finished_event = asyncio.Event() # 再生完了イベント
 
                 def capture_action():
                     nonlocal capture_task
@@ -232,121 +344,186 @@ class AudioLoop:
                         capture_task = asyncio.run_coroutine_threadsafe(_do_capture(), self.loop)
                         capture_callback_triggered.set()
 
+                # 再生状態を監視するタスク
+                async def monitor_playback(p):
+                    while True:
+                        if p.has_started_playing and not p.is_active:
+                            # 再生が開始され、かつアクティブでなくなったら完了とみなす
+                            playback_finished_event.set()
+                            break
+                        await asyncio.sleep(0.1)
+
+                monitor_task = None
+
                 try:
                     turn = self.session.receive()
                     has_received_content = False
                     is_playing = False # 再生が開始されたかを管理するフラグ
                     full_response_text = []
+                    
+                    # サーバーからのレスポンス受信ループ
+                    # async for を直接使うとブロックされるので、anext() を使って制御する
+                    turn_iter = turn.__aiter__()
+                    
+                    while True:
+                        # 次のパケットを待つタスク
+                        next_packet_task = asyncio.create_task(turn_iter.__anext__())
+                        # 再生完了を待つタスク（イベント）
+                        wait_playback_task = asyncio.create_task(playback_finished_event.wait())
+                        
+                        # どちらかが完了するのを待つ
+                        done, pending = await asyncio.wait(
+                            [next_packet_task, wait_playback_task],
+                            return_when=asyncio.FIRST_COMPLETED
+                        )
 
-                    async for response in turn:
-                        text = None
-                        audio_data = getattr(response, "data", None)
+                        # 再生完了イベントが発火した場合
+                        if wait_playback_task in done:
+                            print("\n[Gemini] 音声再生が完了したため、受信ループを強制終了します。")
+                            # 受信タスクをキャンセル
+                            next_packet_task.cancel()
+                            try:
+                                await next_packet_task
+                            except asyncio.CancelledError:
+                                pass
+                            break # ループを抜ける
 
-                        server_content = getattr(response, "server_content", None)
-                        if server_content is not None:
-                            output_tx = getattr(server_content, "output_transcription", None)
-                            if output_tx is not None and getattr(output_tx, "text", None):
-                                text = output_tx.text
-                            
-                            model_turn = getattr(server_content, "model_turn", None)
-                            if model_turn:
-                                for part in model_turn.parts:
-                                    if getattr(part, "thought", None):
-                                        continue
-                                    if part.text:
-                                        text = part.text
-                                    if part.inline_data and part.inline_data.mime_type.startswith("audio"):
-                                        if audio_data is None:
-                                            audio_data = part.inline_data.data
+                        # パケット受信が完了した場合
+                        if next_packet_task in done:
+                            # 待機タスクはキャンセル（次のループで再作成されるため）
+                            wait_playback_task.cancel()
+                            try:
+                                response = next_packet_task.result()
+                            except StopAsyncIteration:
+                                break # ストリーム終了
+                            except Exception as e:
+                                print(f"Error receiving packet: {e}")
+                                break
 
-                        if not text and not audio_data:
-                            continue
+                            # --- 以下、既存のレスポンス処理ロジック ---
+                            text = None
+                            audio_data = getattr(response, "data", None)
 
-                        if not has_received_content:
-                            has_received_content = True
-                            self.mic_is_active.clear()
-                            print("\n--- Mic paused while speaking ---")
-                            
-                            # Geminiが考え始めたら thinking ポーズへ
-                            await asyncio.to_thread(update_pose, "thinking")
+                            server_content = getattr(response, "server_content", None)
+                            if server_content is not None:
+                                if getattr(server_content, "generation_complete", False): #geminiから生成される音声を使用したフラグ判定を行いたい場合は、turn_completeを使う。
+                                    # サーバー側が完了と言ってきたら終了
+                                    # ただし、音声再生がまだ続いている場合は、再生完了まで待ちたいかもしれないが、
+                                    # ユーザー要望は「早い方」なので、ここでも抜けて良いか？
+                                    # いや、音声再生が終わるまでは待ちたいはず（喋り終わってから次へ）。
+                                    # ここでは「サーバーからの受信は終わり」とするが、
+                                    # ループを抜けると finally ブロックへ行き、そこで player.close() される。
+                                    # player.close() はスレッド終了を待つが、再生完了を待つわけではない（wait_doneが必要）。
+                                    # 既存ロジックではループ後に wait_done しているので、ここで break してもOK。
+                                    pass
 
-                            if self.yolo_detector:
-                                self.yolo_detector.pause()
-                            
-                            if config.USE_VOICEVOX:
-                                player = VoicevoxStreamPlayer(
-                                    speaker=config.SPEAKER_ID,
-                                    on_last_chunk_start=None
-                                )
-                                if not player.is_connected:
-                                    print(f"\n[Warning] Voicevoxへの接続に失敗しました。音声再生をスキップします。")
-                                    player = None
-                            else:
-                                # Native Audio Setup
-                                if audio_out_stream is None:
-                                    global pya, pyaudio
-                                    if pyaudio is None:
-                                        import pyaudio
-                                        pya = pyaudio.PyAudio()
-                                    
-                                    audio_out_stream = await asyncio.to_thread(
-                                        pya.open,
-                                        format=pyaudio.paInt16,
-                                        channels=CHANNELS,
-                                        rate=RECEIVE_SAMPLE_RATE,
-                                        output=True
+                                output_tx = getattr(server_content, "output_transcription", None)
+                                if output_tx is not None and getattr(output_tx, "text", None):
+                                    text = output_tx.text
+                                
+                                model_turn = getattr(server_content, "model_turn", None)
+                                if model_turn:
+                                    for part in model_turn.parts:
+                                        if getattr(part, "thought", None):
+                                            continue
+                                        if part.text:
+                                            text = part.text
+                                        if part.inline_data and part.inline_data.mime_type.startswith("audio"):
+                                            if audio_data is None:
+                                                audio_data = part.inline_data.data
+
+                            if not text and not audio_data:
+                                if server_content and getattr(server_content, "turn_complete", False):
+                                    break
+                                continue
+
+                            if not has_received_content:
+                                has_received_content = True
+                                self.mic_is_active.clear()
+                                print("\n--- Mic paused while speaking ---")
+                                
+                                await asyncio.to_thread(update_pose, "thinking")
+
+                                if self.yolo_detector:
+                                    self.yolo_detector.pause()
+                                
+                                if config.USE_VOICEVOX:
+                                    player = VoicevoxStreamPlayer(
+                                        speaker=config.SPEAKER_ID,
+                                        on_last_chunk_start=None
                                     )
-                        
-                        # 再生すべき最初のコンテンツを受け取った時点で default ポーズへ
-                        if has_received_content and not is_playing:
-                            is_playing = True
-                            await asyncio.to_thread(update_pose, "default")
+                                    if not player.is_connected:
+                                        print(f"\n[Warning] Voicevoxへの接続に失敗しました。音声再生をスキップします。")
+                                        player = None
+                                    else:
+                                        # 監視タスクを開始
+                                        monitor_task = asyncio.create_task(monitor_playback(player))
+                                else:
+                                    if audio_out_stream is None:
+                                        global pya, pyaudio
+                                        if pyaudio is None:
+                                            import pyaudio
+                                            pya = pyaudio.PyAudio()
+                                        
+                                        audio_out_stream = await asyncio.to_thread(
+                                            pya.open,
+                                            format=pyaudio.paInt16,
+                                            channels=CHANNELS,
+                                            rate=RECEIVE_SAMPLE_RATE,
+                                            output=True
+                                        )
+                            
+                            if has_received_content and not is_playing:
+                                is_playing = True
+                                await asyncio.to_thread(update_pose, "default")
 
-                        if text:
-                            if "[CAPTURE_IMAGE]" in text:
-                                print("\n!!! 撮影トリガーを検出しました (Stream) !!!")
-                                await asyncio.to_thread(update_pose, "pic")
-                                if config.USE_VOICEVOX and player:
-                                    # 最後のチャンク再生時に撮影を実行
-                                    player.on_last_chunk_start = capture_action
+                            if text:
+                                if "[CAPTURE_IMAGE]" in text:
+                                    print("\n!!! 撮影トリガーを検出しました (Stream) !!!")
+                                    await asyncio.to_thread(update_pose, "pic")
+                                    if config.USE_VOICEVOX and player:
+                                        player.on_last_chunk_start = capture_action
 
-                            full_response_text.append(text)
-                            clean_text = text.replace("[CAPTURE_IMAGE]", "")
-                            if config.USE_VOICEVOX and player and clean_text:
-                                player.add_text(clean_text)
-                        
-                        if not config.USE_VOICEVOX and audio_out_stream and audio_data:
-                            await asyncio.to_thread(audio_out_stream.write, audio_data)
+                                full_response_text.append(text)
+                                clean_text = text.replace("[CAPTURE_IMAGE]", "")
+                                
+                                if clean_text:
+                                    print(clean_text, end="", flush=True)
+
+                                if config.USE_VOICEVOX and player and clean_text:
+                                    player.add_text(clean_text)
+                            
+                            if not config.USE_VOICEVOX and audio_out_stream and audio_data:
+                                await asyncio.to_thread(audio_out_stream.write, audio_data)
+                            
+                            if server_content and getattr(server_content, "generation_complete", False): #geminiから生成される音声を使用したフラグ判定を行いたい場合は、turn_completeを使う。
+                                break
 
                     # --- TURN IS COMPLETE ---
                     if has_received_content:
                         final_text = "".join(full_response_text)
                         
                         if "[CAPTURE_IMAGE]" in final_text:
-                            # Voicevoxでまだコールバックが設定されていない場合のフォールバック
                             if config.USE_VOICEVOX and player:
                                 if not player.on_last_chunk_start:
                                     print("\n!!! 撮影トリガーを検出しました (End of Turn - Fallback) !!!")
                                     await asyncio.to_thread(update_pose, "pic")
                                     player.on_last_chunk_start = capture_action
-                            
-                            # Native Audioの場合はここで実行 (capture_actionは内部で重複実行防止済み)
                             elif not config.USE_VOICEVOX:
                                 print("\n!!! 撮影トリガーを検出しました (Native) !!!")
                                 await asyncio.to_thread(update_pose, "pic")
                                 capture_action()
                         
                         final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").strip()
+                        
                         print("\n\n--- [Full Response Captured] ---")
-                        print(final_text_for_display)
-                        print("--------------------------------\n")
 
                         if config.USE_VOICEVOX and player:
                             player.finish()
+                            # 既に再生完了イベントで抜けてきた場合は wait_done は即座に終わるはずだが、念のため呼ぶ
                             await asyncio.to_thread(player.wait_done)
                             print("\n[Gemini] 音声再生が完了しました。")
 
-                        # 写真撮影タスクが実行中なら完了を待つ
                         if capture_task:
                             try:
                                 await asyncio.wrap_future(capture_task)
@@ -354,9 +531,11 @@ class AudioLoop:
                                 print(f"Capture task failed: {e}")
 
                 finally:
+                    if monitor_task:
+                        monitor_task.cancel()
+                    
                     self.mic_is_active.set()
                     print("--- Mic resumed ---")
-                    # 全ての処理が終わった後、default ポーズに戻す
                     await asyncio.to_thread(update_pose, "default")
 
                     if self.yolo_detector:
@@ -394,30 +573,72 @@ class AudioLoop:
             self.yolo_detector.start()
 
             response_modalities = ["AUDIO"]
-            live_config = {
+            
+            # VAD設定の読み込み
+            vad_config = {}
+            if hasattr(config, 'VAD_POSITIVE_THRESHOLD') and hasattr(config, 'VAD_NEGATIVE_THRESHOLD'):
+                vad_config = {
+                    "positive_threshold": config.VAD_POSITIVE_THRESHOLD,
+                    "negative_threshold": config.VAD_NEGATIVE_THRESHOLD
+                }
+                print(f"[Gemini] VAD Config: {vad_config}")
+
+            # 基本設定
+            base_config = {
                 "response_modalities": response_modalities,
                 "output_audio_transcription": {},
-                "system_instruction": self.system_instruction
+                "system_instruction": self.system_instruction,
+            }
+
+            # VADあり設定
+            config_with_vad = base_config.copy()
+            config_with_vad["speech_config"] = {
+                "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}},
+                "voice_activity_detector": vad_config
+            }
+
+            # VADなし設定 (フォールバック用)
+            config_no_vad = base_config.copy()
+            config_no_vad["speech_config"] = {
+                "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}
             }
 
             print(f"[Gemini] Audio Output Mode: {'VOICEVOX' if config.USE_VOICEVOX else 'GEMINI NATIVE'}")
 
-            async with (
-                client.aio.live.connect(model=MODEL, config=live_config) as session,
-                asyncio.TaskGroup() as tg,
-            ):
-                self.session = session
-                self.out_queue = asyncio.Queue(maxsize=5)
+            async def start_session(live_config):
+                async with (
+                    client.aio.live.connect(model=MODEL, config=live_config) as session,
+                    asyncio.TaskGroup() as tg,
+                ):
+                    self.session = session
+                    self.out_queue = asyncio.Queue(maxsize=5)
 
-                send_text_task = tg.create_task(self.send_text())
-                tg.create_task(self.send_realtime())
-                tg.create_task(self.listen_audio())
-                if self.video_mode == "screen":
-                    tg.create_task(self.get_screen())
-                tg.create_task(self.receive_responses())
+                    send_text_task = tg.create_task(self.send_text())
+                    tg.create_task(self.send_realtime())
+                    tg.create_task(self.listen_audio())
+                    if self.video_mode == "screen":
+                        tg.create_task(self.get_screen())
+                    tg.create_task(self.receive_responses())
 
-                await send_text_task
-                raise asyncio.CancelledError("User requested exit")
+                    await send_text_task
+                    raise asyncio.CancelledError("User requested exit")
+
+            # 接続試行
+            if vad_config:
+                try:
+                    print("[Gemini] Connecting with VAD settings...")
+                    await start_session(config_with_vad)
+                except Exception as e:
+                    # ValidationError かどうかを判定 (型名やメッセージで)
+                    error_str = str(e)
+                    if "ValidationError" in str(type(e).__name__) or "Extra inputs are not permitted" in error_str:
+                        print(f"[Gemini] VAD settings not supported by this SDK version. Falling back to default.")
+                        # print(f"  -> Error details: {error_str.splitlines()[0]}...") # 最初の一行だけ表示 (抑制)
+                        await start_session(config_no_vad)
+                    else:
+                        raise e
+            else:
+                await start_session(config_no_vad)
 
         except asyncio.CancelledError:
             pass

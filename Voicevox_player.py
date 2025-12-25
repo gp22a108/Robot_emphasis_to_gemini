@@ -15,6 +15,7 @@ REQUEST_TIMEOUT = config.REQUEST_TIMEOUT
 SAMPLE_RATE = config.SAMPLE_RATE
 CHANNELS = config.CHANNELS
 WAV_HEADER_SIZE = config.WAV_HEADER_SIZE
+MAX_WORKERS = 4  # 同時処理数の設定
 
 
 def generate_audio_chunk(session: requests.Session, text: str, speaker: int, index: int) -> tuple[int, bytes]:
@@ -74,7 +75,7 @@ class VoicevoxStreamPlayer:
         self._text_buffer = ""  # ストリーミング用テキストバッファ
 
         self._session = requests.Session()
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
         self._audio_queue = queue.Queue()
         self._text_queue = queue.Queue()
         self._results_buffer = {}
@@ -84,20 +85,20 @@ class VoicevoxStreamPlayer:
         self._total_chunks_added = 0
         self._last_chunk_callback_triggered = threading.Event()
         self._play_start_triggered = False
+        self._is_writing = False # 再生デバイス書き込み中フラグ
 
         self._playback_ready = threading.Event()
         self._player_thread = threading.Thread(target=self._playback_worker, daemon=True)
         self._generation_thread = threading.Thread(target=self._generation_worker, daemon=True)
 
         # 接続確認を非同期で行うか、タイムアウトを短くする
-        # ここではタイムアウトを短くして、失敗したら即座に諦める
         if not self._is_voicevox_running():
             self._executor.shutdown()
             return
 
         self._player_thread.start()
         self._generation_thread.start()
-        self._playback_ready.wait(timeout=2.0) # タイムアウトを短縮
+        self._playback_ready.wait(timeout=2.0)
         
         # 再生スレッドが正常に開始したか確認
         if not self._playback_ready.is_set() or not self._player_thread.is_alive():
@@ -112,13 +113,28 @@ class VoicevoxStreamPlayer:
         """再生が開始されたかどうかを返す"""
         return self._play_start_triggered
 
+    @property
+    def is_active(self) -> bool:
+        """
+        プレーヤーがアクティブかどうかを返す。
+        以下のいずれかの場合に True を返す:
+        1. テキストキューに未処理のテキストがある
+        2. 音声キューに未再生の音声データがある
+        3. テキストバッファに未送信のテキストがある
+        4. 生成済みだが再生キューに移動していないデータがある (_next_index_to_play < _next_index_to_generate)
+        5. 現在音声デバイスに書き込み中である
+        """
+        return (not self._text_queue.empty()) or \
+               (not self._audio_queue.empty()) or \
+               (bool(self._text_buffer.strip())) or \
+               (self._next_index_to_play < self._next_index_to_generate) or \
+               self._is_writing
+
     def _is_voicevox_running(self) -> bool:
         """Voicevoxエンジンが起動しているか確認する"""
         try:
-            # タイムアウトを短く設定
             response = self._session.get(f"{BASE_URL}/version", timeout=0.5)
             response.raise_for_status()
-            # print(f"[Voicevox] エンジン接続成功 (Version: {response.text})")
             return True
         except requests.exceptions.RequestException:
             print(f"\n[Voicevox Error] Voicevoxエンジンに接続できません。URL: {BASE_URL}")
@@ -126,7 +142,6 @@ class VoicevoxStreamPlayer:
 
     def _playback_worker(self):
         """音声データをキューから受け取り再生するワーカー"""
-        # 遅延インポート: sounddeviceは初期化に時間がかかる場合があるため
         import sounddevice as sd
 
         stream = None
@@ -143,7 +158,7 @@ class VoicevoxStreamPlayer:
                 if item is None:
                     # 終了時にまだトリガーされていなければ実行 (Fallback)
                     if self.on_last_chunk_start and not self._last_chunk_callback_triggered.is_set():
-                         print("\n--- 全再生終了、コールバックをトリガー(Fallback) ---")
+                         # print("\n--- 全再生終了、コールバックをトリガー(Fallback) ---")
                          self.on_last_chunk_start()
                          self._last_chunk_callback_triggered.set()
 
@@ -156,28 +171,31 @@ class VoicevoxStreamPlayer:
                     if not self._play_start_triggered and pcm_data:
                         self._play_start_triggered = True
                         if self.on_play_start:
-                            print("\n--- 再生開始、コールバックをトリガー ---")
+                            # print("\n--- 再生開始、コールバックをトリガー ---")
                             self.on_play_start()
 
                     # 再生前チェック
                     if self.on_last_chunk_start and self._is_generation_finished and index == self._total_chunks_added - 1:
                         if not self._last_chunk_callback_triggered.is_set():
-                            print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
+                            # print("\n--- 最後のチャンクの再生を開始、コールバックをトリガー ---")
                             self.on_last_chunk_start()
                             self._last_chunk_callback_triggered.set()
 
                     if pcm_data:
+                        self._is_writing = True
                         stream.write(pcm_data)
+                        self._is_writing = False
 
-                    # 再生後チェック (再生中に finish() が呼ばれた場合など)
+                    # 再生後チェック
                     if self.on_last_chunk_start and self._is_generation_finished and index == self._total_chunks_added - 1:
                         if not self._last_chunk_callback_triggered.is_set():
-                            print("\n--- 最後のチャンクの再生完了、コールバックをトリガー(Post-play) ---")
+                            # print("\n--- 最後のチャンクの再生完了、コールバックをトリガー(Post-play) ---")
                             self.on_last_chunk_start()
                             self._last_chunk_callback_triggered.set()
 
                 except Exception as e:
                     print(f"\n[Voicevox Error] 再生中のエラー: {e}")
+                    self._is_writing = False
                 finally:
                     self._audio_queue.task_done()
 
@@ -194,12 +212,13 @@ class VoicevoxStreamPlayer:
         """バッファ内の完了したチャンクを順番に再生キューへ移動する"""
         while self._next_index_to_play in self._results_buffer:
             pcm_data = self._results_buffer.pop(self._next_index_to_play)
-            total_chunks_str = f"{self._total_chunks_added}" if self._is_generation_finished else "?"
-            try:
-                sys.stdout.write(f"\r再生中 ({self._next_index_to_play + 1}/{total_chunks_str})...")
-                sys.stdout.flush()
-            except Exception:
-                pass
+            # コンソール出力を抑制して高速化
+            # total_chunks_str = f"{self._total_chunks_added}" if self._is_generation_finished else "?"
+            # try:
+            #     sys.stdout.write(f"\r再生中 ({self._next_index_to_play + 1}/{total_chunks_str})...")
+            #     sys.stdout.flush()
+            # except Exception:
+            #     pass
             self._audio_queue.put((self._next_index_to_play, pcm_data))
             self._next_index_to_play += 1
 
@@ -274,8 +293,6 @@ class VoicevoxStreamPlayer:
         split_pattern = r'(?<=[、。！？\n])'
         parts = re.split(split_pattern, self._text_buffer)
         
-        # 最後の要素以外は「文」として確定しているのでキューに追加
-        # 最後の要素はまだ途中かもしれないのでバッファに残す
         for part in parts[:-1]:
             if part.strip():
                 self._text_queue.put(part.strip())
@@ -286,7 +303,6 @@ class VoicevoxStreamPlayer:
         """テキストの追加が完了したことを通知する"""
         if not self.is_connected: return
         
-        # バッファに残っているテキストがあればキューに追加
         if self._text_buffer.strip():
             self._text_queue.put(self._text_buffer.strip())
         self._text_buffer = ""
@@ -305,14 +321,6 @@ class VoicevoxStreamPlayer:
         # 全ての音声データが再生キューに追加され、再生スレッドに渡されるのを待つ
         self._audio_queue.join()
 
-        # 再生スレッドに終了シグナルを送り、スレッドが終了するのを待つ（これが実際の再生完了を待つ）
-        self._audio_queue.put(None)
-        if self._player_thread and self._player_thread.is_alive():
-            self._player_thread.join()
-        
-        # 再生終了後、少し待機して余韻を持たせる
-        # time.sleep(0.5) # 遅延を削除
-
     def close(self):
         """リソースを解放する"""
         if hasattr(self, '_text_queue') and self._text_queue:
@@ -320,12 +328,14 @@ class VoicevoxStreamPlayer:
         if hasattr(self, '_audio_queue') and self._audio_queue:
             self._audio_queue.put(None)
         
-        # wait_done()が呼ばれなかった場合などに備え、スレッドの終了を待つ
         if hasattr(self, '_player_thread') and self._player_thread and self._player_thread.is_alive():
             self._player_thread.join(timeout=1)
         
         if hasattr(self, '_executor') and self._executor:
              self._executor.shutdown(wait=False, cancel_futures=True)
+        
+        if hasattr(self, '_session') and self._session:
+            self._session.close()
 
 
 def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callable[[], None]] = None):
@@ -334,13 +344,12 @@ def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callabl
     try:
         player = VoicevoxStreamPlayer(speaker=speaker, on_last_chunk_start=on_last_chunk_start)
         if player.is_connected:
-            # この関数は一括なので、バッファリングロジックは使わず、直接チャンクに分ける
             chunks = _create_chunks(text)
             for chunk in chunks:
-                player._text_queue.put(chunk) # バッファを介さず直接キューに入れる
+                player._text_queue.put(chunk)
             player.finish()
             player.wait_done()
-            player.close() # play_textではここで閉じる
+            player.close()
     except Exception as e:
         print(f"An unexpected error occurred in play_text: {e}")
         if player:
@@ -377,7 +386,6 @@ def main():
             print("プレーヤーが接続されていないため、テストをスキップします。")
             return
 
-        # テキストを少しずつ追加していく（断片的な入力をシミュレート）
         parts = ["これは", "ストリーミング", "再生の", "テストです。", "テキストが、", "このように、", "少しずつ、", "追加されても、", "スムーズに、", "再生されるはずです。"]
         
         for part in parts:
