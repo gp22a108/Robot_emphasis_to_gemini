@@ -83,6 +83,8 @@ class AudioLoop:
         - 少し一つの会話の長さ控えめで
         - 必ず、写真撮影の同意を取ってください。
         - "今"を"いま"で出力
+        - 写真を撮るときに何度も許可を取らなくて良い。「ポケットに手突っ込んじゃって！」
+        - 撮影が終わって何往復かして妥当とされるタイミングで終了してください。その時に、プロンプトの最後に、[End_Talk]を文章の最後に出力してください。
 
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
@@ -167,12 +169,6 @@ class AudioLoop:
         
         「カッケェ……（小声で）」
         
-        「これ来ましたね」
-        
-        「優勝です」
-        
-        「Nice! Perfect!（急な英語）」
-        
         「画になりすぎてる」
         
         5. 写真確認・別れ際（クロージング）
@@ -189,8 +185,6 @@ class AudioLoop:
         「ご協力ありがとうございました！」
         
         「またどこかでお会いしましょう！」
-        
-        「（去り際にハイタッチやグータッチを求める）」
         
         「気を付けて！」
         
@@ -222,14 +216,20 @@ class AudioLoop:
             parts=[types.Part(text=text)],
         )
 
+    async def _on_detected(self):
+        """検出時の非同期処理"""
+        print("[Gemini] Person detected! Activating microphone.")
+        self.mic_is_active.set()
+        await self.session.send_client_content(
+            turns=self._user_turn("Detected"),
+            turn_complete=True,
+        )
+
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
         if self.session and self.loop:
             asyncio.run_coroutine_threadsafe(
-                self.session.send_client_content(
-                    turns=self._user_turn("Detected"),
-                    turn_complete=True,
-                ),
+                self._on_detected(),
                 self.loop,
             )
 
@@ -313,6 +313,20 @@ class AudioLoop:
                     )
                 )
 
+    async def monitor_timeout(self):
+        """60秒間人が検出されなかったらリセットする監視タスク"""
+        print("[Gemini] Timeout monitor started.")
+        while True:
+            await asyncio.sleep(1.0)
+            if self.yolo_detector:
+                last_seen = self.yolo_detector.last_person_seen_time
+                # 60秒以上人が検出されていない場合
+                if time.time() - last_seen > 60:
+                    # 現在ブロック中（DETECTION_INTERVAL内）であればリセット
+                    if (time.time() - self.yolo_detector.last_detection_time) < config.DETECTION_INTERVAL:
+                        print("[Gemini] No person seen for 60s. Resetting detection timer.")
+                        self.yolo_detector.last_detection_time = 0
+
     async def receive_responses(self):
         """Live API からのレスポンスを受信し、テキストを組み立てて処理"""
         from Voicevox_player import VoicevoxStreamPlayer  # 遅延インポート
@@ -325,6 +339,7 @@ class AudioLoop:
                 capture_callback_triggered = asyncio.Event()
                 capture_task = None
                 playback_finished_event = asyncio.Event() # 再生完了イベント
+                should_resume_mic = True # マイク再開フラグ
 
                 def capture_action():
                     nonlocal capture_task
@@ -408,13 +423,6 @@ class AudioLoop:
                             if server_content is not None:
                                 if getattr(server_content, "generation_complete", False): #geminiから生成される音声を使用したフラグ判定を行いたい場合は、turn_completeを使う。
                                     # サーバー側が完了と言ってきたら終了
-                                    # ただし、音声再生がまだ続いている場合は、再生完了まで待ちたいかもしれないが、
-                                    # ユーザー要望は「早い方」なので、ここでも抜けて良いか？
-                                    # いや、音声再生が終わるまでは待ちたいはず（喋り終わってから次へ）。
-                                    # ここでは「サーバーからの受信は終わり」とするが、
-                                    # ループを抜けると finally ブロックへ行き、そこで player.close() される。
-                                    # player.close() はスレッド終了を待つが、再生完了を待つわけではない（wait_doneが必要）。
-                                    # 既存ロジックではループ後に wait_done しているので、ここで break してもOK。
                                     pass
 
                                 output_tx = getattr(server_content, "output_transcription", None)
@@ -485,7 +493,7 @@ class AudioLoop:
                                         player.on_last_chunk_start = capture_action
 
                                 full_response_text.append(text)
-                                clean_text = text.replace("[CAPTURE_IMAGE]", "")
+                                clean_text = text.replace("[CAPTURE_IMAGE]", "").replace("[End_Talk]", "")
                                 
                                 if clean_text:
                                     print(clean_text, end="", flush=True)
@@ -514,7 +522,18 @@ class AudioLoop:
                                 await asyncio.to_thread(update_pose, "pic")
                                 capture_action()
                         
-                        final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").strip()
+                        if "[End_Talk]" in final_text:
+                            print("\n[Gemini] End of conversation detected. Enforcing 15s cooldown.")
+                            should_resume_mic = False # マイク再開を抑制
+                            if self.yolo_detector:
+                                # 15秒間検出をブロックするように last_detection_time を設定
+                                # 次の検出可能時刻 = now + 15s
+                                # YOLO判定: (now - last) > INTERVAL
+                                # 15秒後に判定がTrueになるには: (now + 15 - last) = INTERVAL
+                                # => last = now + 15 - INTERVAL
+                                self.yolo_detector.last_detection_time = time.time() - config.DETECTION_INTERVAL + 15
+
+                        final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").replace("[End_Talk]", "").strip()
                         
                         print("\n\n--- [Full Response Captured] ---")
 
@@ -534,8 +553,13 @@ class AudioLoop:
                     if monitor_task:
                         monitor_task.cancel()
                     
-                    self.mic_is_active.set()
-                    print("--- Mic resumed ---")
+                    if should_resume_mic:
+                        self.mic_is_active.set()
+                        print("--- Mic resumed ---")
+                    else:
+                        self.mic_is_active.clear()
+                        print("--- Mic kept muted (End_Talk) ---")
+
                     await asyncio.to_thread(update_pose, "default")
 
                     if self.yolo_detector:
@@ -616,6 +640,7 @@ class AudioLoop:
                     send_text_task = tg.create_task(self.send_text())
                     tg.create_task(self.send_realtime())
                     tg.create_task(self.listen_audio())
+                    tg.create_task(self.monitor_timeout()) # タイムアウト監視タスクを追加
                     if self.video_mode == "screen":
                         tg.create_task(self.get_screen())
                     tg.create_task(self.receive_responses())
