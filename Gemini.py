@@ -45,6 +45,9 @@ pyaudio = None
 PIL = None
 mss = None
 
+class SessionResetException(Exception):
+    pass
+
 # 定数定義
 FORMAT = 8 # pyaudio.paInt16 (値は8)
 CHANNELS = 1
@@ -84,8 +87,9 @@ class AudioLoop:
         - 必ず、写真撮影の同意を取ってください。
         - "今"を"いま"で出力
         - 写真を撮るときに何度も許可を取らなくて良い。「ポケットに手突っ込んじゃって！」
-        - 撮影が終わって何往復かして妥当とされるタイミングで終了してください。その時に、プロンプトの最後に、[End_Talk]を文章の最後に出力してください。
-
+        - 撮影が終わって何往復会話をして「バイバイ」と言ってからで終了してください。その時に、プロンプトの最後に、[End_Talk]を文章の最後に出力してください。
+        - 写真撮影の許可が出たらたくさん写真を撮って
+        
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
 
@@ -207,6 +211,7 @@ class AudioLoop:
         self.mic_is_active = asyncio.Event()
         # self.mic_is_active.set()
         print("[Gemini] Microphone initialized in MUTE state.")
+        self.reset_trigger = False
 
     @staticmethod
     def _user_turn(text: str):
@@ -316,22 +321,29 @@ class AudioLoop:
     async def monitor_timeout(self):
         """60秒間人が検出されなかったらリセットする監視タスク"""
         print("[Gemini] Timeout monitor started.")
+        session_start_time = time.time()
         while True:
             await asyncio.sleep(1.0)
             if self.yolo_detector:
                 last_seen = self.yolo_detector.last_person_seen_time
-                # 60秒以上人が検出されていない場合
-                if time.time() - last_seen > 60:
-                    # 現在ブロック中（DETECTION_INTERVAL内）であればリセット
-                    if (time.time() - self.yolo_detector.last_detection_time) < config.DETECTION_INTERVAL:
-                        print("[Gemini] No person seen for 60s. Resetting detection timer.")
-                        self.yolo_detector.last_detection_time = 0
+                
+                # セッション開始前の検出は無視（まだこのセッションで人を見ていない）
+                if last_seen < session_start_time:
+                    continue
+
+                # 30秒以上人が検出されていない場合
+                if time.time() - last_seen > 30:
+                    print("[Gemini] No person seen for 30s. Resetting session.")
+                    self.yolo_detector.last_detection_time = 0 # Ensure we can detect immediately
+                    self.reset_trigger = True
+                    raise SessionResetException()
 
     async def receive_responses(self):
         """Live API からのレスポンスを受信し、テキストを組み立てて処理"""
         from Voicevox_player import VoicevoxStreamPlayer  # 遅延インポート
 
         audio_out_stream = None
+        next_packet_task = None # タスク管理用変数を初期化
 
         try:
             while True:
@@ -401,6 +413,7 @@ class AudioLoop:
                                 await next_packet_task
                             except asyncio.CancelledError:
                                 pass
+                            next_packet_task = None # キャンセル済みとしてマーク
                             break # ループを抜ける
 
                         # パケット受信が完了した場合
@@ -410,10 +423,14 @@ class AudioLoop:
                             try:
                                 response = next_packet_task.result()
                             except StopAsyncIteration:
+                                next_packet_task = None
                                 break # ストリーム終了
                             except Exception as e:
                                 print(f"Error receiving packet: {e}")
+                                next_packet_task = None
                                 break
+                            
+                            next_packet_task = None # 処理完了
 
                             # --- 以下、既存のレスポンス処理ロジック ---
                             text = None
@@ -532,6 +549,8 @@ class AudioLoop:
                                 # 15秒後に判定がTrueになるには: (now + 15 - last) = INTERVAL
                                 # => last = now + 15 - INTERVAL
                                 self.yolo_detector.last_detection_time = time.time() - config.DETECTION_INTERVAL + 15
+                            
+                            raise SessionResetException()
 
                         final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").replace("[End_Talk]", "").strip()
                         
@@ -553,12 +572,15 @@ class AudioLoop:
                     if monitor_task:
                         monitor_task.cancel()
                     
+                    if self.reset_trigger:
+                        should_resume_mic = False
+
                     if should_resume_mic:
                         self.mic_is_active.set()
                         print("--- Mic resumed ---")
                     else:
                         self.mic_is_active.clear()
-                        print("--- Mic kept muted (End_Talk) ---")
+                        print("--- Mic kept muted (End_Talk/Timeout) ---")
 
                     await asyncio.to_thread(update_pose, "default")
 
@@ -567,6 +589,16 @@ class AudioLoop:
                     if player:
                         player.close()
         finally:
+            # 終了時に保留中のタスクがあればキャンセルして例外を回収する
+            if next_packet_task and not next_packet_task.done():
+                next_packet_task.cancel()
+            
+            if next_packet_task:
+                try:
+                    await next_packet_task
+                except Exception:
+                    pass
+
             if audio_out_stream:
                 audio_out_stream.close()
 
@@ -630,6 +662,7 @@ class AudioLoop:
             print(f"[Gemini] Audio Output Mode: {'VOICEVOX' if config.USE_VOICEVOX else 'GEMINI NATIVE'}")
 
             async def start_session(live_config):
+                self.reset_trigger = False
                 async with (
                     client.aio.live.connect(model=MODEL, config=live_config) as session,
                     asyncio.TaskGroup() as tg,
@@ -648,22 +681,54 @@ class AudioLoop:
                     await send_text_task
                     raise asyncio.CancelledError("User requested exit")
 
-            # 接続試行
-            if vad_config:
+            def is_reset_exception(e):
+                if isinstance(e, SessionResetException):
+                    return True
+                if isinstance(e, ExceptionGroup):
+                    return any(is_reset_exception(ex) for ex in e.exceptions)
+                return False
+
+            while True:
                 try:
-                    print("[Gemini] Connecting with VAD settings...")
-                    await start_session(config_with_vad)
-                except Exception as e:
-                    # ValidationError かどうかを判定 (型名やメッセージで)
-                    error_str = str(e)
-                    if "ValidationError" in str(type(e).__name__) or "Extra inputs are not permitted" in error_str:
-                        print(f"[Gemini] VAD settings not supported by this SDK version. Falling back to default.")
-                        # print(f"  -> Error details: {error_str.splitlines()[0]}...") # 最初の一行だけ表示 (抑制)
-                        await start_session(config_no_vad)
+                    # 接続試行
+                    if vad_config:
+                        try:
+                            print("[Gemini] Connecting with VAD settings...")
+                            await start_session(config_with_vad)
+                        except Exception as e:
+                            if is_reset_exception(e):
+                                raise SessionResetException() from e
+                            
+                            # ValidationError かどうかを判定 (型名やメッセージで)
+                            error_str = str(e)
+                            if "ValidationError" in str(type(e).__name__) or "Extra inputs are not permitted" in error_str:
+                                print(f"[Gemini] VAD settings not supported by this SDK version. Falling back to default.")
+                                # print(f"  -> Error details: {error_str.splitlines()[0]}...") # 最初の一行だけ表示 (抑制)
+                                await start_session(config_no_vad)
+                            else:
+                                raise e
                     else:
-                        raise e
-            else:
-                await start_session(config_no_vad)
+                        await start_session(config_no_vad)
+                    
+                    break # Normal exit
+
+                except SessionResetException:
+                    print("[Gemini] Session reset requested. Restarting session...")
+                    await asyncio.sleep(1)
+                    continue
+                except Exception as e:
+                    if is_reset_exception(e):
+                        print("[Gemini] Session reset requested. Restarting session...")
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    if isinstance(e, asyncio.CancelledError):
+                        break
+                    
+                    if self.audio_stream:
+                        self.audio_stream.close()
+                    traceback.print_exc()
+                    break
 
         except asyncio.CancelledError:
             pass
