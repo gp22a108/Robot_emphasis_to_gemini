@@ -67,7 +67,7 @@ def update_pose(mode):
     try:
         url = "http://127.0.0.1:8000/pose"
         data = {"mode": mode}
-        requests.post(url, json=data, timeout=0.5)
+        requests.post(url, json=data, timeout=2.0)
     except Exception as e:
         print(f"Failed to update pose to {mode}: {e}")
 
@@ -75,7 +75,7 @@ class AudioLoop:
     def __init__(self, video_mode: str = DEFAULT_MODE):
         self.video_mode = video_mode
         self.system_instruction = """### 役割と振る舞い
-        - 必ず、テキストを出力してください。
+        - 必ず、「テキスト」を出力してください。
         - ユーザーに対しては、友達のように親しみやすく、少し馴れ馴れしい口調（タメ口など）で接してください。
         - おじさん(カメラマンの荒木経惟)みたいな感じで。
         - 基本的にすべて日本語で回答してください。
@@ -87,7 +87,7 @@ class AudioLoop:
         - 必ず、写真撮影の同意を取ってください。
         - "今"を"いま"で出力
         - 写真を撮るときに何度も許可を取らなくて良い。「ポケットに手突っ込んじゃって！」
-        - 撮影が終わって何往復会話をして「バイバイ」と言ってからで終了してください。その時に、プロンプトの最後に、[End_Talk]を文章の最後に出力してください。
+        - 撮影が終わって何度か会話をして「バイバイ」と言ってからで終了してください。その時に、プロンプトの最後に、[End_Talk]を文章の最後に出力してください。
         - 写真撮影の許可が出たらたくさん写真を撮って
         
         ### 【重要】カメラ撮影の制御コマンド
@@ -352,6 +352,7 @@ class AudioLoop:
                 capture_task = None
                 playback_finished_event = asyncio.Event() # 再生完了イベント
                 should_resume_mic = True # マイク再開フラグ
+                end_talk_detected = False # End_Talk検出フラグ
 
                 def capture_action():
                     nonlocal capture_task
@@ -366,6 +367,13 @@ class AudioLoop:
                             from Capture import take_picture  # 遅延インポート
                             frame_to_capture = self.yolo_detector.get_current_frame()
                             await asyncio.to_thread(take_picture, frame_to_capture, 0)
+
+                            # Send prompt
+                            print("[Gemini] Sending post-capture praise prompt.")
+                            await self.session.send_client_content(
+                                turns=self._user_turn("System Prompt →撮影結果を褒めて"),
+                                turn_complete=True,
+                            )
 
                         # メインループで実行するようにスケジュールし、Futureを保存
                         capture_task = asyncio.run_coroutine_threadsafe(_do_capture(), self.loop)
@@ -517,6 +525,9 @@ class AudioLoop:
 
                                 if config.USE_VOICEVOX and player and clean_text:
                                     player.add_text(clean_text)
+                                
+                                if "[End_Talk]" in text:
+                                    end_talk_detected = True
                             
                             if not config.USE_VOICEVOX and audio_out_stream and audio_data:
                                 await asyncio.to_thread(audio_out_stream.write, audio_data)
@@ -539,19 +550,6 @@ class AudioLoop:
                                 await asyncio.to_thread(update_pose, "pic")
                                 capture_action()
                         
-                        if "[End_Talk]" in final_text:
-                            print("\n[Gemini] End of conversation detected. Enforcing 15s cooldown.")
-                            should_resume_mic = False # マイク再開を抑制
-                            if self.yolo_detector:
-                                # 15秒間検出をブロックするように last_detection_time を設定
-                                # 次の検出可能時刻 = now + 15s
-                                # YOLO判定: (now - last) > INTERVAL
-                                # 15秒後に判定がTrueになるには: (now + 15 - last) = INTERVAL
-                                # => last = now + 15 - INTERVAL
-                                self.yolo_detector.last_detection_time = time.time() - config.DETECTION_INTERVAL + 15
-                            
-                            raise SessionResetException()
-
                         final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").replace("[End_Talk]", "").strip()
                         
                         print("\n\n--- [Full Response Captured] ---")
@@ -567,6 +565,16 @@ class AudioLoop:
                                 await asyncio.wrap_future(capture_task)
                             except Exception as e:
                                 print(f"Capture task failed: {e}")
+                        
+                        # End_Talk の処理を再生完了後に移動
+                        if end_talk_detected:
+                            print("\n[Gemini] End of conversation detected. Enforcing 15s cooldown.")
+                            should_resume_mic = False # マイク再開を抑制
+                            if self.yolo_detector:
+                                # 15秒間検出をブロックするように last_detection_time を設定
+                                self.yolo_detector.last_detection_time = time.time() - config.DETECTION_INTERVAL + 15
+                            
+                            raise SessionResetException()
 
                 finally:
                     if monitor_task:

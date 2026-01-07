@@ -81,21 +81,29 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                         # SSEフォーマットでメッセージを構築
                         sse_message = f"data: {line1}\ndata: {line2}\n\n"
 
-                        self.wfile.write(sse_message.encode("utf-8"))
-                        self.wfile.flush()
-                        last_sent_data_str = current_data_str
-                        last_heartbeat_time = time.time()
+                        try:
+                            self.wfile.write(sse_message.encode("utf-8"))
+                            self.wfile.flush()
+                            last_sent_data_str = current_data_str
+                            last_heartbeat_time = time.time()
+                        except (ConnectionAbortedError, BrokenPipeError):
+                            print("Client disconnected during write.")
+                            return
 
                     # 一定時間データ送信がない場合、ハートビートを送信 (3秒間隔)
                     elif time.time() - last_heartbeat_time > 3.0:
-                        self.wfile.write(b": keep-alive\n\n")
-                        self.wfile.flush()
-                        last_heartbeat_time = time.time()
+                        try:
+                            self.wfile.write(b": keep-alive\n\n")
+                            self.wfile.flush()
+                            last_heartbeat_time = time.time()
+                        except (ConnectionAbortedError, BrokenPipeError):
+                            print("Client disconnected during heartbeat.")
+                            return
 
                     time.sleep(0.1)
 
-            except BrokenPipeError:
-                print("Client disconnected.")
+            except Exception as e:
+                print(f"SSE loop error: {e}")
             finally:
                 return
         else:
@@ -107,10 +115,10 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         global pose_data
         if self.path == '/pose':
-            content_length = int(self.headers['Content-Length'])
-            post_body = self.rfile.read(content_length)
-
             try:
+                content_length = int(self.headers['Content-Length'])
+                post_body = self.rfile.read(content_length)
+
                 received_data = json.loads(post_body)
 
                 with data_lock:
@@ -136,20 +144,30 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 response = {'status': 'success', 'message': 'Pose data updated'}
-                self.wfile.write(json.dumps(response).encode('utf-8'))
+                try:
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                except (ConnectionAbortedError, BrokenPipeError):
+                    print("Client disconnected before response could be sent.")
 
             except json.JSONDecodeError:
                 self.send_response(400)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 response = {'status': 'error', 'message': 'Invalid JSON'}
-                self.wfile.write(json.dumps(response).encode('utf-8'))
+                try:
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                except (ConnectionAbortedError, BrokenPipeError):
+                    pass
             except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                response = {'status': 'error', 'message': str(e)}
-                self.wfile.write(json.dumps(response).encode('utf-8'))
+                print(f"POST error: {e}")
+                try:
+                    self.send_response(500)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    response = {'status': 'error', 'message': str(e)}
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                except (ConnectionAbortedError, BrokenPipeError):
+                    pass
         else:
             self.send_response(404)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
