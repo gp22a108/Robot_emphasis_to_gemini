@@ -62,7 +62,8 @@ pya = None
 def update_pose(mode):
     """Http_realtime.py にポーズ変更リクエストを送信する"""
     try:
-        url = f"http://{config.HTTP_SERVER_HOST}:{config.HTTP_SERVER_PORT}/pose"
+        # 127.0.0.1 を使用して接続を試みる
+        url = f"http://127.0.0.1:{config.HTTP_SERVER_PORT}/pose"
         data = {"mode": mode}
         requests.post(url, json=data, timeout=2.0)
     except Exception as e:
@@ -655,7 +656,7 @@ class AudioLoop:
                 "system_instruction": self.system_instruction,
             }
 
-            # VADあり設定
+            # VADなし設定 (フォールバック用)
             config_with_vad = base_config.copy()
             config_with_vad["speech_config"] = {
                 "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}},
