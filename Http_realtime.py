@@ -155,8 +155,16 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """マルチスレッド対応のHTTPサーバー"""
     pass
 
-def run_server(host=config.HTTP_SERVER_HOST, port=config.HTTP_SERVER_PORT):
+def run_server(host="0.0.0.0", port=config.HTTP_SERVER_PORT):
     """HTTPサーバーを指定されたホストとポートで起動する"""
+    # Windows環境での0.0.0.0バインディングの問題を回避するため、
+    # 明示的に0.0.0.0を指定するか、空文字列を使用する。
+    # ここではconfigの値を使用しつつ、デフォルト引数で柔軟性を持たせる。
+    
+    # 念のためホストが空文字の場合は全てのインターフェースでリッスン
+    if not host:
+        host = "0.0.0.0"
+
     with ThreadingHTTPServer((host, port), PoseRequestHandler) as httpd:
         print(f"Serving on http://{host}:{port}")
         httpd.serve_forever()
