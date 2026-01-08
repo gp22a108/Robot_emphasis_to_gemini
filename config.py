@@ -55,6 +55,8 @@ SAMPLE_RATE = 24000
 CHANNELS = 1
 # WAVヘッダーサイズ
 WAV_HEADER_SIZE = 44
+# 同時処理数
+MAX_WORKERS = 1
 
 # --- Gemini VAD設定 (感度調整) ---
 # 発話開始のしきい値 (0.0〜1.0)
@@ -67,3 +69,43 @@ VAD_POSITIVE_THRESHOLD = 0.0
 # 値が大きいほど、発話終了の判定が早くなります（キレが良い）。
 # レスポンスを早くするために高めに設定
 VAD_NEGATIVE_THRESHOLD = 1.0
+
+# --- Http_realtime設定 ---
+# HTTPサーバーのホスト
+HTTP_SERVER_HOST = "0.0.0.0"
+# HTTPサーバーのポート
+HTTP_SERVER_PORT = 8000
+
+# --- ポーズデータ設定 ---
+POSE_DATA_DEFAULT = {   #デフォルトのポーズ
+    "CSotaMotion.SV_R_SHOULDER": 700,
+    "CSotaMotion.SV_R_ELBOW": 0,
+    "CSotaMotion.SV_L_SHOULDER": -150,
+    "CSotaMotion.SV_L_ELBOW": -500,
+    "CSotaMotion.SV_HEAD_Y": 0,
+    "CSotaMotion.SV_HEAD_R": 0,
+    "CSotaMotion.SV_BODY_Y": 0,
+    "CSotaMotion.SV_HEAD_P": 0,
+}
+
+POSE_DATA_THINKING = {   #考え中のポーズ
+    "CSotaMotion.SV_R_SHOULDER": 550,
+    "CSotaMotion.SV_R_ELBOW": 700,
+    "CSotaMotion.SV_L_SHOULDER": -150,
+    "CSotaMotion.SV_L_ELBOW": -580,
+    "CSotaMotion.SV_HEAD_Y": 0,
+    "CSotaMotion.SV_HEAD_R": -300,
+    "CSotaMotion.SV_BODY_Y": 0,
+    "CSotaMotion.SV_HEAD_P": 0, # 少しうつむくなど変化をつける
+}
+
+POSE_DATA_PIC = {   #撮影時のポーズ
+    "CSotaMotion.SV_R_SHOULDER": 700,
+    "CSotaMotion.SV_R_ELBOW": 0,
+    "CSotaMotion.SV_L_SHOULDER": 0,
+    "CSotaMotion.SV_L_ELBOW": -700,
+    "CSotaMotion.SV_HEAD_Y": 0,
+    "CSotaMotion.SV_HEAD_R": 550,
+    "CSotaMotion.SV_BODY_Y": 0,
+    "CSotaMotion.SV_HEAD_P": 0,
+}

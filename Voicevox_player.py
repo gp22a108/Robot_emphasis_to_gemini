@@ -15,7 +15,7 @@ REQUEST_TIMEOUT = config.REQUEST_TIMEOUT
 SAMPLE_RATE = config.SAMPLE_RATE
 CHANNELS = config.CHANNELS
 WAV_HEADER_SIZE = config.WAV_HEADER_SIZE
-MAX_WORKERS = 1  # 同時処理数の設定
+MAX_WORKERS = config.MAX_WORKERS  # 同時処理数の設定
 
 
 def generate_audio_chunk(session: requests.Session, text: str, speaker: int, index: int) -> tuple[int, bytes]:

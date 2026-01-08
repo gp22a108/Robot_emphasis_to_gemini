@@ -62,7 +62,7 @@ pya = None
 def update_pose(mode):
     """Http_realtime.py にポーズ変更リクエストを送信する"""
     try:
-        url = "http://127.0.0.1:8000/pose"
+        url = f"http://{config.HTTP_SERVER_HOST}:{config.HTTP_SERVER_PORT}/pose"
         data = {"mode": mode}
         requests.post(url, json=data, timeout=2.0)
     except Exception as e:

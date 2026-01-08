@@ -5,40 +5,12 @@ import threading
 import time
 import json # jsonモジュールをインポート
 from socketserver import ThreadingMixIn
+import config # 設定ファイルをインポート
 
 # --- グローバル変数 ---
-pose_data_default = {   #デフォルトのポーズ
-    "CSotaMotion.SV_R_SHOULDER": 700,
-    "CSotaMotion.SV_R_ELBOW": 0,
-    "CSotaMotion.SV_L_SHOULDER": -150,
-    "CSotaMotion.SV_L_ELBOW": -500,
-    "CSotaMotion.SV_HEAD_Y": 0,
-    "CSotaMotion.SV_HEAD_R": 0,
-    "CSotaMotion.SV_BODY_Y": 0,
-    "CSotaMotion.SV_HEAD_P": 0,
-}
-
-pose_data_thinking = {   #考え中のポーズ
-    "CSotaMotion.SV_R_SHOULDER": 550,
-    "CSotaMotion.SV_R_ELBOW": 700,
-    "CSotaMotion.SV_L_SHOULDER": -150,
-    "CSotaMotion.SV_L_ELBOW": -580,
-    "CSotaMotion.SV_HEAD_Y": 0,
-    "CSotaMotion.SV_HEAD_R": -300,
-    "CSotaMotion.SV_BODY_Y": 0,
-    "CSotaMotion.SV_HEAD_P": 0, # 少しうつむくなど変化をつける
-}
-
-pose_data_pic = {   #撮影時のポーズ
-    "CSotaMotion.SV_R_SHOULDER": 700,
-    "CSotaMotion.SV_R_ELBOW": 0,
-    "CSotaMotion.SV_L_SHOULDER": 0,
-    "CSotaMotion.SV_L_ELBOW": -700,
-    "CSotaMotion.SV_HEAD_Y": 0,
-    "CSotaMotion.SV_HEAD_R": 550,
-    "CSotaMotion.SV_BODY_Y": 0,
-    "CSotaMotion.SV_HEAD_P": 0,
-}
+pose_data_default = config.POSE_DATA_DEFAULT.copy()
+pose_data_thinking = config.POSE_DATA_THINKING.copy()
+pose_data_pic = config.POSE_DATA_PIC.copy()
 
 # 現在のポーズデータを初期化
 pose_data = pose_data_default.copy()
@@ -183,7 +155,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """マルチスレッド対応のHTTPサーバー"""
     pass
 
-def run_server(host="0.0.0.0", port=8000):
+def run_server(host=config.HTTP_SERVER_HOST, port=config.HTTP_SERVER_PORT):
     """HTTPサーバーを指定されたホストとポートで起動する"""
     with ThreadingHTTPServer((host, port), PoseRequestHandler) as httpd:
         print(f"Serving on http://{host}:{port}")
