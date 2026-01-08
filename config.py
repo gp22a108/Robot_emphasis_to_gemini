@@ -62,7 +62,7 @@ MAX_WORKERS = 1
 # 発話終了とみなすまでの無音時間 (ミリ秒)
 # 値を小さくすると、発話終了の判定が早くなります（キレが良い）。
 # 値を大きくすると、発話終了の判定が遅くなります（間を許容する）。
-SPEECH_SILENCE_DURATION_MS = 50
+SPEECH_SILENCE_DURATION_MS = 0
 
 # 旧設定 (無効化)
 # VAD_POSITIVE_THRESHOLD = 0.0
