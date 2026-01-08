@@ -26,14 +26,11 @@ python Gemini.py --mode screen
 from __future__ import annotations
 
 import time
-import sys
-import os
 import asyncio
 import traceback
 import argparse
 import io
 import requests
-import json
 
 # 設定ファイル
 import config
