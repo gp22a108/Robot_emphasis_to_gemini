@@ -86,7 +86,7 @@ class AudioLoop:
         - 必ず、写真撮影の同意を取ってください。
         - "今"を"いま"で出力
         - 写真を撮るときに何度も許可を取らなくて良い。「ポケットに手突っ込んじゃって！」
-        - 撮影が終わって何度か会話をして「バイバイ」と言ってからで終了してください。その時に、プロンプトの最後に、[End_Talk]を文章の最後に出力してください。
+        - 撮影が終わって最低でも2往復の会話をして「バイバイ」と言ってからで終了してください。その時に、プロンプトの最後に、[End_Talk]を文章の最後に出力してください。
         - 写真撮影の許可が出たらたくさん写真を撮って
         - 性別が曖昧なときは服装の特徴で喋りかけて。
         - 『』は使用しないでそのまま出力して。
@@ -641,13 +641,25 @@ class AudioLoop:
             response_modalities = ["AUDIO"]
             
             # VAD設定の読み込み
+            # 新しい設定 (silence_duration_ms) を優先し、なければ古い設定を使う
             vad_config = {}
-            if hasattr(config, 'VAD_POSITIVE_THRESHOLD') and hasattr(config, 'VAD_NEGATIVE_THRESHOLD'):
+            if hasattr(config, 'SPEECH_SILENCE_DURATION_MS'):
+                 vad_config = {
+                    "automatic_activity_detection": {
+                        "disabled": False,
+                        "end_of_speech_sensitivity": types.EndSensitivity.END_SENSITIVITY_LOW,
+                        "silence_duration_ms": config.SPEECH_SILENCE_DURATION_MS,
+                        "prefix_padding_ms": 20
+                    }
+                 }
+                 print(f"[Gemini] VAD Config (New): {vad_config}")
+            elif hasattr(config, 'VAD_POSITIVE_THRESHOLD') and hasattr(config, 'VAD_NEGATIVE_THRESHOLD'):
+                # 古い設定 (互換性のため残す場合)
                 vad_config = {
                     "positive_threshold": config.VAD_POSITIVE_THRESHOLD,
                     "negative_threshold": config.VAD_NEGATIVE_THRESHOLD
                 }
-                print(f"[Gemini] VAD Config: {vad_config}")
+                print(f"[Gemini] VAD Config (Old): {vad_config}")
 
             # 基本設定
             base_config = {
@@ -656,12 +668,21 @@ class AudioLoop:
                 "system_instruction": self.system_instruction,
             }
 
-            # VADなし設定 (フォールバック用)
+            # VADあり設定
             config_with_vad = base_config.copy()
-            config_with_vad["speech_config"] = {
-                "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}},
-                "voice_activity_detector": vad_config
-            }
+            
+            # 新しい設定形式の場合
+            if "automatic_activity_detection" in vad_config:
+                 config_with_vad["realtime_input_config"] = vad_config
+                 config_with_vad["speech_config"] = {
+                    "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}
+                }
+            else:
+                # 古い設定形式の場合
+                config_with_vad["speech_config"] = {
+                    "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}},
+                    "voice_activity_detector": vad_config
+                }
 
             # VADなし設定 (フォールバック用)
             config_no_vad = base_config.copy()
