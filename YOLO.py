@@ -71,10 +71,12 @@ class YOLOOptimizer:
 
         # 結果受け渡し用キュー
         self.result_queue = queue.Queue(maxsize=2)
+        self.face_result_queue = queue.Queue(maxsize=2) # 顔検出結果用キュー
         self.command_queue = queue.Queue(maxsize=1) # ロボット制御コマンド用キュー
         
         # 描画用キャッシュ
         self.latest_results = []
+        self.latest_face_results = []
         
         # OpenVINO関連オブジェクト (run内で初期化)
         self.core = None
@@ -83,11 +85,15 @@ class YOLOOptimizer:
         self.infer_queue = None
         
         # 顔検出用モデル (YOLOv12n-face)
-        self.face_model = None
         self.face_model_size = 'n' # 'n', 's', 'm', 'l'
         # 同じフォルダにある yolov12n-face.pt を使用
         self.face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'yolov12{self.face_model_size}-face.pt')
         self.face_confidence_threshold = 0.5
+        
+        # OpenVINO顔検出用
+        self.face_net = None
+        self.compiled_face_model = None
+        self.face_infer_queue = None
 
     def is_ready(self):
         """初期化が完了したかどうかを返す"""
@@ -112,21 +118,6 @@ class YOLOOptimizer:
         
         print(f"[YOLO] ライブラリ読み込み完了: {time.perf_counter() - t_start:.3f}s")
 
-        # --- 顔検出モデルの準備 ---
-        if os.path.exists(self.face_model_path):
-            try:
-                print(f"[YOLO] 顔検出モデルを読み込んでいます: {self.face_model_path}")
-                self.face_model = YOLO(self.face_model_path)
-                print("[YOLO] 顔検出モデルの初期化完了")
-            except Exception as e:
-                print(f"[YOLO] 顔検出モデルの初期化に失敗: {e}")
-        else:
-            print(f"[YOLO] 顔検出モデルが見つかりません: {self.face_model_path}")
-
-        if not os.path.exists(self.model_path):
-            print(f"\n[エラー] モデルファイルが見つかりません: {os.path.abspath(self.model_path)}")
-            raise FileNotFoundError(f"Model not found at {self.model_path}")
-
         # --- 計測の準備 ---
         p = psutil.Process()
         p.cpu_percent(None)
@@ -147,11 +138,16 @@ class YOLOOptimizer:
                 ov.properties.hint.performance_mode: ov.properties.hint.PerformanceMode.THROUGHPUT
             })
 
+        # --- メインモデルの読み込み ---
+        if not os.path.exists(self.model_path):
+            print(f"\n[エラー] モデルファイルが見つかりません: {os.path.abspath(self.model_path)}")
+            raise FileNotFoundError(f"Model not found at {self.model_path}")
+
         print(f"[YOLO] モデルを読み込んでいます: {self.model_path}")
         self.model = self.core.read_model(self.model_path)
         last_time, last_cpu = measure_and_print("モデル読み込み", last_time, last_cpu, p)
 
-        self._setup_preprocessing()
+        self._setup_preprocessing(self.model)
         last_time, last_cpu = measure_and_print("前処理プロセス統合", last_time, last_cpu, p)
 
         print(f"[YOLO] モデルをデバイス({self.device_name})向けにコンパイル中...")
@@ -160,13 +156,44 @@ class YOLOOptimizer:
 
         self.infer_queue = ov.AsyncInferQueue(self.compiled_model, jobs=0)
         self.infer_queue.set_callback(self._completion_callback)
+
+        # --- 顔検出モデルの準備 (OpenVINO) ---
+        face_model_dir = os.path.join(os.path.dirname(self.face_model_path), f'yolov12{self.face_model_size}-face_openvino_model')
+        face_xml_path = os.path.join(face_model_dir, f'yolov12{self.face_model_size}-face.xml')
+
+        if not os.path.exists(face_xml_path):
+            if os.path.exists(self.face_model_path):
+                print(f"[YOLO] 顔検出モデルをOpenVINO形式に変換しています: {self.face_model_path}")
+                try:
+                    model = YOLO(self.face_model_path)
+                    model.export(format='openvino')
+                    print("[YOLO] 変換完了")
+                except Exception as e:
+                    print(f"[YOLO] 顔検出モデルの変換に失敗: {e}")
+            else:
+                print(f"[YOLO] 顔検出モデル(.pt)が見つかりません: {self.face_model_path}")
+
+        if os.path.exists(face_xml_path):
+            try:
+                print(f"[YOLO] 顔検出モデル(OpenVINO)を読み込んでいます: {face_xml_path}")
+                self.face_net = self.core.read_model(face_xml_path)
+                self._setup_preprocessing(self.face_net) # 同じ前処理を適用
+                
+                print(f"[YOLO] 顔検出モデルをデバイス({self.device_name})向けにコンパイル中...")
+                self.compiled_face_model = self.core.compile_model(self.face_net, self.device_name)
+                self.face_infer_queue = ov.AsyncInferQueue(self.compiled_face_model, jobs=0)
+                self.face_infer_queue.set_callback(self._face_completion_callback)
+                print("[YOLO] 顔検出モデルの初期化完了")
+            except Exception as e:
+                print(f"[YOLO] 顔検出モデル(OpenVINO)の初期化に失敗: {e}")
+                traceback.print_exc()
         
         measure_and_print("初期化全体", total_start_time, total_start_cpu, p)
         self.is_ready_event.set() # 初期化完了を通知
 
-    def _setup_preprocessing(self):
-        ppp = PrePostProcessor(self.model)
-        input_layer = self.model.input(0)
+    def _setup_preprocessing(self, model):
+        ppp = PrePostProcessor(model)
+        input_layer = model.input(0)
         input_tensor_name = input_layer.any_name
 
         ppp.input(input_tensor_name).tensor() \
@@ -182,7 +209,7 @@ class YOLOOptimizer:
             .scale([255.0, 255.0, 255.0])
 
         ppp.input(input_tensor_name).model().set_layout(ov.Layout('NCHW'))
-        self.model = ppp.build()
+        model = ppp.build()
 
     def _completion_callback(self, request, userdata):
         try:
@@ -238,6 +265,65 @@ class YOLOOptimizer:
 
         except Exception:
             print("Error in callback:")
+            traceback.print_exc()
+
+    def _face_completion_callback(self, request, userdata):
+        try:
+            original_frame, start_time, h_scale, w_scale = userdata
+            
+            output_tensor = request.get_output_tensor(0).data
+            if output_tensor.ndim == 3:
+                output_tensor = output_tensor[0]
+
+            # YOLO output format: [x, y, w, h, conf, ...]
+            detections = np.transpose(output_tensor)
+            
+            # 顔検出モデルは通常1クラスなので、スコアはindex 4にあると仮定
+            # もしクラス確率が続くなら np.max(detections[:, 4:], axis=1) を使うが、
+            # 1クラスなら detections[:, 4] がスコア
+            if detections.shape[1] > 4:
+                scores = detections[:, 4]
+            else:
+                scores = np.zeros(detections.shape[0])
+
+            mask = scores > self.face_confidence_threshold
+            
+            filtered_detections = detections[mask]
+            filtered_scores = scores[mask]
+
+            results = []
+            if len(filtered_detections) > 0:
+                cx = filtered_detections[:, 0]
+                cy = filtered_detections[:, 1]
+                w = filtered_detections[:, 2]
+                h = filtered_detections[:, 3]
+
+                x1 = (cx - w / 2) * w_scale
+                y1 = (cy - h / 2) * h_scale
+                w_pixel = w * w_scale
+                h_pixel = h * h_scale
+
+                boxes = np.stack([x1, y1, w_pixel, h_pixel], axis=1).astype(int).tolist()
+                confidences = filtered_scores.tolist()
+
+                indices = cv2.dnn.NMSBoxes(boxes, confidences, self.face_confidence_threshold, config.NMS_THRESHOLD)
+
+                if len(indices) > 0:
+                    for i in indices.flatten():
+                        results.append({
+                            'box': boxes[i],
+                            'conf': confidences[i]
+                        })
+
+            if self.face_result_queue.full():
+                try:
+                    self.face_result_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.face_result_queue.put(results)
+
+        except Exception:
+            print("Error in face callback:")
             traceback.print_exc()
 
     def set_gemini_response(self, text):
@@ -315,7 +401,7 @@ class YOLOOptimizer:
                 # 通信エラー等は無視
                 pass
 
-    def _draw_results(self, frame, results, process_time_ms):
+    def _draw_results(self, frame, results, face_results, process_time_ms):
         PERSON_HEIGHT_THRESHOLD = 360
         current_time = time.time()
         detection_count = len(results)
@@ -327,38 +413,22 @@ class YOLOOptimizer:
         closest_person_cx = None
         min_dist_from_center = float('inf')
 
-        # --- 顔検出の実行 (YOLOv12n-face) ---
-        face_results = []
-        if self.face_model:
-            # CLAHE処理 (顔検出精度向上のため)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            yuv_img = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
-            yuv_img[:,:,0] = clahe.apply(yuv_img[:,:,0])
-            clahe_frame = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR)
+        # --- 顔検出の結果描画 ---
+        for res in face_results:
+            x, y, w, h = res['box']
+            conf = res['conf']
             
-            # 推論実行
-            f_results = self.face_model(clahe_frame, verbose=False)
+            # 顔の描画
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(frame, f"Face {conf:.2f}", (x, y - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
-            if f_results[0].boxes is not None:
-                boxes = f_results[0].boxes.xyxy.cpu().numpy()
-                confs = f_results[0].boxes.conf.cpu().numpy()
-                
-                for box, conf in zip(boxes, confs):
-                    if conf >= self.face_confidence_threshold:
-                        x1, y1, x2, y2 = map(int, box)
-                        face_results.append({'box': (x1, y1, x2, y2), 'conf': conf})
-                        
-                        # 顔の描画
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(frame, f"Face {conf:.2f}", (x1, y1 - 10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                        
-                        # 追跡ロジック (顔優先)
-                        cx = (x1 + x2) / 2
-                        dist = abs(cx - frame_center_x)
-                        if dist < min_dist_from_center:
-                            min_dist_from_center = dist
-                            closest_person_cx = cx
+            # 追跡ロジック (顔優先)
+            cx = x + w / 2
+            dist = abs(cx - frame_center_x)
+            if dist < min_dist_from_center:
+                min_dist_from_center = dist
+                closest_person_cx = cx
 
         # --- OpenVINO物体検出の結果描画 ---
         for res in results:
@@ -481,11 +551,20 @@ class YOLOOptimizer:
 
                 input_tensor = np.expand_dims(frame, 0)
 
+                # メインモデルの推論開始
                 self.infer_queue.start_async(
                     inputs={0: input_tensor},
                     userdata=(frame, time.time(), h_scale, w_scale)
                 )
 
+                # 顔検出モデルの推論開始 (OpenVINO)
+                if self.face_infer_queue:
+                    self.face_infer_queue.start_async(
+                        inputs={0: input_tensor},
+                        userdata=(frame, time.time(), h_scale, w_scale)
+                    )
+
+                # 結果の取得 (メイン)
                 try:
                     while True:
                         _, r_results, r_time = self.result_queue.get_nowait()
@@ -493,9 +572,17 @@ class YOLOOptimizer:
                         self.inference_time_ms = r_time
                 except queue.Empty:
                     pass
+
+                # 結果の取得 (顔)
+                try:
+                    while True:
+                        f_results = self.face_result_queue.get_nowait()
+                        self.latest_face_results = f_results
+                except queue.Empty:
+                    pass
                 
                 display_frame = frame.copy()
-                self._draw_results(display_frame, self.latest_results, self.inference_time_ms)
+                self._draw_results(display_frame, self.latest_results, self.latest_face_results, self.inference_time_ms)
                 cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -509,6 +596,8 @@ class YOLOOptimizer:
             print("[待機] 推論タスク完了待ち...")
             if self.infer_queue:
                 self.infer_queue.wait_all()
+            if self.face_infer_queue:
+                self.face_infer_queue.wait_all()
             if 'cap' in locals() and cap:
                 cap.release()
             if cv2:
