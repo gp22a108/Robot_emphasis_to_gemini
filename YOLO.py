@@ -6,6 +6,8 @@ import sys
 import queue
 import traceback
 from pathlib import Path
+import requests
+import urllib.request
 
 # 設定ファイルをインポート
 import config
@@ -20,6 +22,7 @@ PrePostProcessor = None
 ResizeAlgorithm = None
 ColorFormat = None
 psutil = None
+YOLO = None # ultralytics YOLO
 
 def measure_and_print(step_name, start_time, start_cpu, process):
     """処理時間とCPU占有率を計測して表示するヘルパー関数"""
@@ -50,6 +53,7 @@ class YOLOOptimizer:
         self.last_time = time.time()
         self.inference_time_ms = 0.0
         self.thread = None
+        self.command_thread = None # ロボット制御用スレッド
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.current_frame_for_capture = None
@@ -67,6 +71,7 @@ class YOLOOptimizer:
 
         # 結果受け渡し用キュー
         self.result_queue = queue.Queue(maxsize=2)
+        self.command_queue = queue.Queue(maxsize=1) # ロボット制御コマンド用キュー
         
         # 描画用キャッシュ
         self.latest_results = []
@@ -76,6 +81,13 @@ class YOLOOptimizer:
         self.model = None
         self.compiled_model = None
         self.infer_queue = None
+        
+        # 顔検出用モデル (YOLOv12n-face)
+        self.face_model = None
+        self.face_model_size = 'n' # 'n', 's', 'm', 'l'
+        # 同じフォルダにある yolov12n-face.pt を使用
+        self.face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'yolov12{self.face_model_size}-face.pt')
+        self.face_confidence_threshold = 0.5
 
     def is_ready(self):
         """初期化が完了したかどうかを返す"""
@@ -83,7 +95,7 @@ class YOLOOptimizer:
 
     def _initialize_dependencies(self):
         """依存ライブラリとモデルの初期化（別スレッドで実行）"""
-        global cv2, np, ov, PrePostProcessor, ResizeAlgorithm, ColorFormat, psutil
+        global cv2, np, ov, PrePostProcessor, ResizeAlgorithm, ColorFormat, psutil, YOLO
         
         if cv2 is not None:
             return
@@ -96,8 +108,20 @@ class YOLOOptimizer:
         import openvino as ov
         from openvino.preprocess import PrePostProcessor, ResizeAlgorithm, ColorFormat
         import psutil
+        from ultralytics import YOLO
         
         print(f"[YOLO] ライブラリ読み込み完了: {time.perf_counter() - t_start:.3f}s")
+
+        # --- 顔検出モデルの準備 ---
+        if os.path.exists(self.face_model_path):
+            try:
+                print(f"[YOLO] 顔検出モデルを読み込んでいます: {self.face_model_path}")
+                self.face_model = YOLO(self.face_model_path)
+                print("[YOLO] 顔検出モデルの初期化完了")
+            except Exception as e:
+                print(f"[YOLO] 顔検出モデルの初期化に失敗: {e}")
+        else:
+            print(f"[YOLO] 顔検出モデルが見つかりません: {self.face_model_path}")
 
         if not os.path.exists(self.model_path):
             print(f"\n[エラー] モデルファイルが見つかりません: {os.path.abspath(self.model_path)}")
@@ -277,6 +301,20 @@ class YOLOOptimizer:
             cv2.putText(frame, line, (margin + 10, y), font, font_scale, color, thickness, cv2.LINE_AA)
             y += line_height
 
+    def _command_worker(self):
+        """ロボット制御コマンドを送信するワーカースレッド"""
+        while not self.stop_event.is_set():
+            try:
+                body_y = self.command_queue.get(timeout=0.5)
+                url = f"http://127.0.0.1:{config.HTTP_SERVER_PORT}/pose"
+                data = {"CSotaMotion.SV_BODY_Y": int(body_y)}
+                requests.post(url, json=data, timeout=0.1)
+            except queue.Empty:
+                continue
+            except Exception:
+                # 通信エラー等は無視
+                pass
+
     def _draw_results(self, frame, results, process_time_ms):
         PERSON_HEIGHT_THRESHOLD = 360
         current_time = time.time()
@@ -284,16 +322,65 @@ class YOLOOptimizer:
         best_h = 0
         person_center_x = None
 
+        # 追跡用変数
+        frame_center_x = frame.shape[1] / 2
+        closest_person_cx = None
+        min_dist_from_center = float('inf')
+
+        # --- 顔検出の実行 (YOLOv12n-face) ---
+        face_results = []
+        if self.face_model:
+            # CLAHE処理 (顔検出精度向上のため)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            yuv_img = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+            yuv_img[:,:,0] = clahe.apply(yuv_img[:,:,0])
+            clahe_frame = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR)
+            
+            # 推論実行
+            f_results = self.face_model(clahe_frame, verbose=False)
+            
+            if f_results[0].boxes is not None:
+                boxes = f_results[0].boxes.xyxy.cpu().numpy()
+                confs = f_results[0].boxes.conf.cpu().numpy()
+                
+                for box, conf in zip(boxes, confs):
+                    if conf >= self.face_confidence_threshold:
+                        x1, y1, x2, y2 = map(int, box)
+                        face_results.append({'box': (x1, y1, x2, y2), 'conf': conf})
+                        
+                        # 顔の描画
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(frame, f"Face {conf:.2f}", (x1, y1 - 10), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        
+                        # 追跡ロジック (顔優先)
+                        cx = (x1 + x2) / 2
+                        dist = abs(cx - frame_center_x)
+                        if dist < min_dist_from_center:
+                            min_dist_from_center = dist
+                            closest_person_cx = cx
+
+        # --- OpenVINO物体検出の結果描画 ---
         for res in results:
             x, y, w, h = res['box']
             confidence = res['confidence']
             class_id = res['class_id']
             label = config.CLASSES.get(class_id, 'Unknown')
 
-            if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
-                if h > best_h:
-                    best_h = h
-                    person_center_x = x + w / 2
+            if label == 'person':
+                # 通知用のロジック (既存)
+                if h > PERSON_HEIGHT_THRESHOLD:
+                    if h > best_h:
+                        best_h = h
+                        person_center_x = x + w / 2
+                
+                # 顔が検出されなかった場合のフォールバック追跡
+                if closest_person_cx is None:
+                    cx = x + w / 2
+                    dist = abs(cx - frame_center_x)
+                    if dist < min_dist_from_center:
+                        min_dist_from_center = dist
+                        closest_person_cx = cx
 
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
                 if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
@@ -302,17 +389,35 @@ class YOLOOptimizer:
                         self.on_detection()
                     self.last_detection_time = current_time
 
-            color = (0, 255, 0)
+            color = (255, 0, 0) # 人物は青色で描画
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
 
             label_text = f"{label} {confidence:.0%}"
             (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             cv2.rectangle(frame, (x, y - text_h - 10), (x + text_w, y), color, -1)
             cv2.putText(frame, label_text, (x, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
         if best_h > 0 and person_center_x is not None:
             self.last_person_seen_time = current_time
+
+        # ロボット追跡コマンドの送信
+        if closest_person_cx is not None:
+            width = frame.shape[1]
+            # 画面中央(width/2) -> 0
+            # 画面左端(0) -> -900
+            # 画面右端(width) -> 900
+            # 計算式: (cx / width) * 1800 - 900
+            body_y = (closest_person_cx / width) * 1800 - 900
+            body_y = max(-900, min(900, body_y))
+            
+            # キューに最新のコマンドを入れる（古いものは捨てる）
+            if self.command_queue.full():
+                try:
+                    self.command_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.command_queue.put(body_y)
 
         self._draw_gemini_response(frame)
 
@@ -426,6 +531,11 @@ class YOLOOptimizer:
     def start(self):
         if self.thread is None:
             self.stop_event.clear()
+            
+            # ロボット制御用スレッドの開始
+            self.command_thread = threading.Thread(target=self._command_worker, daemon=True)
+            self.command_thread.start()
+            
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
             print("[YOLO] スレッドを開始しました。")
@@ -439,7 +549,13 @@ class YOLOOptimizer:
                 print("[YOLO] スレッドの停止に失敗しました。")
             else:
                 print("[YOLO] スレッドが正常に停止しました。")
+        
+        # ロボット制御用スレッドの停止
+        if hasattr(self, 'command_thread') and self.command_thread and self.command_thread.is_alive():
+             self.command_thread.join(timeout=1)
+             
         self.thread = None
+        self.command_thread = None
 
 def simple_callback():
     pass
