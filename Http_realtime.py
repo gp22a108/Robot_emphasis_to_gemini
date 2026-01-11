@@ -119,7 +119,8 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                 try:
                     self.wfile.write(json.dumps(response).encode('utf-8'))
                 except (ConnectionAbortedError, BrokenPipeError):
-                    print("Client disconnected before response could be sent.")
+                    # print("Client disconnected before response could be sent.")
+                    pass
 
             except json.JSONDecodeError:
                 self.send_response(400)

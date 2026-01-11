@@ -166,7 +166,7 @@ class YOLOOptimizer:
                 print(f"[YOLO] 顔検出モデルをOpenVINO形式に変換しています: {self.face_model_path}")
                 try:
                     model = YOLO(self.face_model_path)
-                    model.export(format='openvino')
+                    model.export(format='openvino', half=True) # FP16でエクスポート
                     print("[YOLO] 変換完了")
                 except Exception as e:
                     print(f"[YOLO] 顔検出モデルの変換に失敗: {e}")
