@@ -15,6 +15,12 @@ pose_data_pic = config.POSE_DATA_PIC.copy()
 # 現在のポーズデータを初期化
 pose_data = pose_data_default.copy()
 
+# YOLO制御用の値を保持する変数
+yolo_control_values = {
+    "CSotaMotion.SV_BODY_Y": 0,
+    "CSotaMotion.SV_HEAD_P": 0
+}
+
 data_lock = threading.Lock()
 
 
@@ -41,8 +47,12 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                 # 接続が続く限りループ
                 while True:
                     with data_lock:
-                        ids = list(pose_data.keys())
-                        positions = list(pose_data.values())
+                        # 現在のポーズデータにYOLO制御値をマージ
+                        current_pose = pose_data.copy()
+                        current_pose.update(yolo_control_values)
+                        
+                        ids = list(current_pose.keys())
+                        positions = list(current_pose.values())
 
                     line1 = ",".join(ids)
                     line2 = ",".join(map(str, positions))
@@ -85,7 +95,7 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Not Found\n")
 
     def do_POST(self):
-        global pose_data
+        global pose_data, yolo_control_values
         if self.path == '/pose':
             try:
                 content_length = int(self.headers['Content-Length'])
@@ -109,7 +119,13 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                     else:
                         # 個別の値を更新
                         for key, value in received_data.items():
-                            if key in pose_data:
+                            # YOLO制御対象のキーかどうかチェック
+                            if key in yolo_control_values:
+                                yolo_control_values[key] = value
+                            elif key in pose_data:
+                                pose_data[key] = value
+                            else:
+                                # 新しいキーの場合はpose_dataに追加（必要に応じて）
                                 pose_data[key] = value
 
                 self.send_response(200)
