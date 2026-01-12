@@ -82,8 +82,8 @@ POSE_DATA_DEFAULT = {   #デフォルトのポーズ
     "CSotaMotion.SV_L_ELBOW": -500,
     "CSotaMotion.SV_HEAD_Y": 0,
     "CSotaMotion.SV_HEAD_R": 0,
-    "CSotaMotion.SV_BODY_Y": 0,
-    "CSotaMotion.SV_HEAD_P": 0,
+    #"CSotaMotion.SV_BODY_Y": 0,    sota側のプログラムにswitch関数を使用しているため、無くても動作します。
+    #"CSotaMotion.SV_HEAD_P": 0,    この２行はYOLOで制御されるため、無効化してください。sotaプログラム起動時に0で初期化されます。
 }
 
 POSE_DATA_THINKING = {   #考え中のポーズ
@@ -93,8 +93,8 @@ POSE_DATA_THINKING = {   #考え中のポーズ
     "CSotaMotion.SV_L_ELBOW": -580,
     "CSotaMotion.SV_HEAD_Y": 0,
     "CSotaMotion.SV_HEAD_R": -300,
-    "CSotaMotion.SV_BODY_Y": 0,
-    "CSotaMotion.SV_HEAD_P": 0, # 少しうつむくなど変化をつける
+    #"CSotaMotion.SV_BODY_Y": 0,
+    #"CSotaMotion.SV_HEAD_P": 0, # 少しうつむくなど変化をつける
 }
 
 POSE_DATA_PIC = {   #撮影時のポーズ
@@ -104,6 +104,6 @@ POSE_DATA_PIC = {   #撮影時のポーズ
     "CSotaMotion.SV_L_ELBOW": -700,
     "CSotaMotion.SV_HEAD_Y": 0,
     "CSotaMotion.SV_HEAD_R": 550,
-    "CSotaMotion.SV_BODY_Y": 0,
-    "CSotaMotion.SV_HEAD_P": 0,
+    #"CSotaMotion.SV_BODY_Y": 0,
+    #"CSotaMotion.SV_HEAD_P": 0,
 }

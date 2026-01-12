@@ -2,12 +2,10 @@
 import time
 import threading
 import os
-import sys
 import queue
 import traceback
 from pathlib import Path
 import requests
-import urllib.request
 
 # 設定ファイルをインポート
 import config
@@ -405,10 +403,20 @@ class YOLOOptimizer:
         """ロボット制御コマンドを送信するワーカースレッド"""
         while not self.stop_event.is_set():
             try:
-                body_y = self.command_queue.get(timeout=0.5)
+                command_data = self.command_queue.get(timeout=0.5)
                 url = f"http://127.0.0.1:{config.HTTP_SERVER_PORT}/pose"
-                data = {"CSotaMotion.SV_BODY_Y": int(body_y)}
-                requests.post(url, json=data, timeout=0.1)
+                
+                json_data = {}
+                if isinstance(command_data, dict):
+                    if 'body' in command_data:
+                        json_data["CSotaMotion.SV_BODY_Y"] = int(command_data['body'])
+                    if 'head' in command_data:
+                        json_data["CSotaMotion.SV_HEAD_P"] = int(command_data['head'])
+                else:
+                    # Fallback for legacy or simple int
+                    json_data["CSotaMotion.SV_BODY_Y"] = int(command_data)
+                
+                requests.post(url, json=json_data, timeout=0.1)
             except queue.Empty:
                 continue
             except Exception:
@@ -424,7 +432,9 @@ class YOLOOptimizer:
 
         # 追跡用変数
         frame_center_x = frame.shape[1] / 2
+        frame_height = frame.shape[0]
         closest_person_cx = None
+        closest_person_cy = None
         min_dist_from_center = float('inf')
 
         # --- 顔検出の結果描画 ---
@@ -439,10 +449,12 @@ class YOLOOptimizer:
             
             # 追跡ロジック (顔優先)
             cx = x + w / 2
+            cy = y + h / 2
             dist = abs(cx - frame_center_x)
             if dist < min_dist_from_center:
                 min_dist_from_center = dist
                 closest_person_cx = cx
+                closest_person_cy = cy
 
         # --- OpenVINO物体検出の結果描画 ---
         for res in results:
@@ -461,10 +473,12 @@ class YOLOOptimizer:
                 # 顔が検出されなかった場合のフォールバック追跡
                 if closest_person_cx is None:
                     cx = x + w / 2
+                    cy = y + h / 2
                     dist = abs(cx - frame_center_x)
                     if dist < min_dist_from_center:
                         min_dist_from_center = dist
                         closest_person_cx = cx
+                        closest_person_cy = cy
 
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
                 if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
@@ -488,24 +502,32 @@ class YOLOOptimizer:
         # ロボット追跡コマンドの送信
         if closest_person_cx is not None:
             width = frame.shape[1]
-            # 画面中央(width/2) -> 0
-            # 画面左端(0) -> 900 (変更)
-            # 画面右端(width) -> -900 (変更)
-            # 計算式: -1 * ((cx / width) * 1800 - 900)
-            # または: 900 - (cx / width) * 1800
+            height = frame.shape[0]
             
+            # Body Y calculation
             raw_val = (closest_person_cx / width) * 1800 - 900
-            body_y = -1 * raw_val # 符号を反転
-            
+            body_y = -1 * raw_val 
             body_y = max(-900, min(900, body_y))
             
+            # Head P calculation
+            # Top (-290) <-> Center (0) <-> Bottom (80)
+            head_p = 0
+            if closest_person_cy < height / 2:
+                # Upper half: Map [0, h/2] to [-290, 0]
+                head_p = -290 + (closest_person_cy / (height / 2)) * 290
+            else:
+                # Lower half: Map [h/2, h] to [0, 80]
+                head_p = ((closest_person_cy - height / 2) / (height / 2)) * 80
+            
+            head_p = max(-290, min(80, head_p))
+
             # キューに最新のコマンドを入れる（古いものは捨てる）
             if self.command_queue.full():
                 try:
                     self.command_queue.get_nowait()
                 except queue.Empty:
                     pass
-            self.command_queue.put(body_y)
+            self.command_queue.put({'body': body_y, 'head': head_p})
 
         self._draw_gemini_response(frame)
 
