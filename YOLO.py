@@ -475,10 +475,14 @@ class YOLOOptimizer:
         if closest_person_cx is not None:
             width = frame.shape[1]
             # 画面中央(width/2) -> 0
-            # 画面左端(0) -> -900
-            # 画面右端(width) -> 900
-            # 計算式: (cx / width) * 1800 - 900
-            body_y = (closest_person_cx / width) * 1800 - 900
+            # 画面左端(0) -> 900 (変更)
+            # 画面右端(width) -> -900 (変更)
+            # 計算式: -1 * ((cx / width) * 1800 - 900)
+            # または: 900 - (cx / width) * 1800
+            
+            raw_val = (closest_person_cx / width) * 1800 - 900
+            body_y = -1 * raw_val # 符号を反転
+
             body_y = max(-900, min(900, body_y))
             
             # キューに最新のコマンドを入れる（古いものは捨てる）

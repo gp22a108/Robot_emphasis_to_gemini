@@ -6,7 +6,7 @@
 # モデルファイルのパス
 MODEL_PATH = "yolov12n_openvino_model/yolov12n.xml"
 # 使用するデバイス ("CPU", "GPU", "AUTO")
-DEVICE_NAME = "GPU"
+DEVICE_NAME = "AUTO"
 # モデルキャッシュのディレクトリ
 CACHE_DIR = "./model_cache"
 # モデルの入力サイズ
