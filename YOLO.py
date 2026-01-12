@@ -94,10 +94,24 @@ class YOLOOptimizer:
         self.face_net = None
         self.compiled_face_model = None
         self.face_infer_queue = None
+        
+        # FPS制御用
+        self.target_fps = 30.0 # デフォルトFPS
+        self.low_fps_mode = False
 
     def is_ready(self):
         """初期化が完了したかどうかを返す"""
         return self.is_ready_event.is_set()
+
+    def set_low_fps_mode(self, enabled):
+        """低FPSモードの切り替え"""
+        self.low_fps_mode = enabled
+        if enabled:
+            self.target_fps = 3.0
+            print("[YOLO] Low FPS Mode: ON (3 FPS)")
+        else:
+            self.target_fps = 30.0
+            print("[YOLO] Low FPS Mode: OFF (30 FPS)")
 
     def _initialize_dependencies(self):
         """依存ライブラリとモデルの初期化（別スレッドで実行）"""
@@ -482,7 +496,7 @@ class YOLOOptimizer:
             
             raw_val = (closest_person_cx / width) * 1800 - 900
             body_y = -1 * raw_val # 符号を反転
-
+            
             body_y = max(-900, min(900, body_y))
             
             # キューに最新のコマンドを入れる（古いものは捨てる）
@@ -538,6 +552,8 @@ class YOLOOptimizer:
             print("\n[開始] 推論ループを開始します。")
             
             while not self.stop_event.is_set():
+                loop_start_time = time.time() # ループ開始時間
+
                 if self.pause_event.is_set():
                     time.sleep(0.1)
                     continue
@@ -592,6 +608,12 @@ class YOLOOptimizer:
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("[終了] ユーザー指示")
                     break
+                
+                # FPS制御
+                elapsed_time = time.time() - loop_start_time
+                target_frame_time = 1.0 / self.target_fps
+                if elapsed_time < target_frame_time:
+                    time.sleep(target_frame_time - elapsed_time)
 
         except Exception as e:
             print(f"[YOLO Error] {e}")

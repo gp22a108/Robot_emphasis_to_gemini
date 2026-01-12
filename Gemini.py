@@ -226,6 +226,10 @@ class AudioLoop:
 
     async def _on_detected(self):
         """検出時の非同期処理"""
+        # 既にマイクがアクティブなら何もしない（重複ログ防止）
+        if self.mic_is_active.is_set():
+            return
+            
         print("[Gemini] Person detected! Activating microphone.")
         self.mic_is_active.set()
         await self.session.send_client_content(
@@ -389,7 +393,8 @@ class AudioLoop:
                             # 再生が開始され、かつアクティブでなくなったら完了とみなす
                             playback_finished_event.set()
                             break
-                        await asyncio.sleep(0.1)
+                        # 3FPS程度で監視 (0.33秒間隔)
+                        await asyncio.sleep(0.33)
 
                 monitor_task = None
 
@@ -480,8 +485,9 @@ class AudioLoop:
                                 
                                 await asyncio.to_thread(update_pose, "thinking")
 
+                                # YOLOを低FPSモードに切り替え
                                 if self.yolo_detector:
-                                    self.yolo_detector.pause()
+                                    self.yolo_detector.set_low_fps_mode(True)
                                 
                                 if config.USE_VOICEVOX:
                                     player = VoicevoxStreamPlayer(
@@ -595,8 +601,10 @@ class AudioLoop:
 
                     await asyncio.to_thread(update_pose, "default")
 
+                    # YOLOを通常FPSモードに戻す
                     if self.yolo_detector:
-                        self.yolo_detector.resume()
+                        self.yolo_detector.set_low_fps_mode(False)
+
                     if player:
                         player.close()
         finally:
