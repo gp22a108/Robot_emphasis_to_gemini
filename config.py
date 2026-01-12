@@ -83,7 +83,7 @@ POSE_DATA_DEFAULT = {   #デフォルトのポーズ
     "CSotaMotion.SV_HEAD_Y": 0,
     "CSotaMotion.SV_HEAD_R": 0,
     #"CSotaMotion.SV_BODY_Y": 0,    sota側のプログラムにswitch関数を使用しているため、無くても動作します。
-    #"CSotaMotion.SV_HEAD_P": 0,    この２行はYOLOで制御されるため、無効化してください。sotaプログラム起動時に0で初期化されます。
+    #"CSotaMotion.SV_HEAD_P": 0,    この２行はHttp_realtimeに初期値を設定しています。上書きを避けるためにコメントアウトしてください。sotaプログラム起動時に0で初期化されます。
 }
 
 POSE_DATA_THINKING = {   #考え中のポーズ

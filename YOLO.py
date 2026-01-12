@@ -97,6 +97,9 @@ class YOLOOptimizer:
         self.target_fps = 30.0 # デフォルトFPS
         self.low_fps_mode = False
 
+        # ターゲット追跡用
+        self.target_box = None
+
     def is_ready(self):
         """初期化が完了したかどうかを返す"""
         return self.is_ready_event.is_set()
@@ -435,28 +438,81 @@ class YOLOOptimizer:
         frame_height = frame.shape[0]
         closest_person_cx = None
         closest_person_cy = None
-        min_dist_from_center = float('inf')
+        
+        # ターゲット追跡ロジック (顔)
+        matched_face = None
+        
+        # 1. 既存のターゲットを追跡
+        if self.target_box is not None:
+            tx, ty, tw, th = self.target_box
+            tcx = tx + tw / 2
+            tcy = ty + th / 2
+            
+            best_match = None
+            min_dist = float('inf')
+            
+            for res in face_results:
+                x, y, w, h = res['box']
+                cx = x + w / 2
+                cy = y + h / 2
+                
+                # 中心点間の距離の二乗
+                dist = (cx - tcx)**2 + (cy - tcy)**2
+                if dist < min_dist:
+                    min_dist = dist
+                    best_match = res
+            
+            # 閾値判定 (例: 画面幅の1/3程度動いたらロストとするか、あるいは単に一番近いものを採用するか)
+            # ここではある程度近い場合のみ同一人物とみなす
+            # 1280x720なので、例えば400px以上飛んだら別人/誤検出の可能性
+            if best_match and min_dist < (400**2):
+                matched_face = best_match
+                self.target_box = best_match['box']
+            else:
+                self.target_box = None # ターゲットロスト
+
+        # 2. ターゲットがいない場合、新規ターゲットを選定 (中央に一番近い顔)
+        if self.target_box is None and face_results:
+            best_match = None
+            min_dist_from_center = float('inf')
+            
+            for res in face_results:
+                x, y, w, h = res['box']
+                cx = x + w / 2
+                dist = abs(cx - frame_center_x)
+                
+                if dist < min_dist_from_center:
+                    min_dist_from_center = dist
+                    best_match = res
+            
+            if best_match:
+                matched_face = best_match
+                self.target_box = best_match['box']
 
         # --- 顔検出の結果描画 ---
         for res in face_results:
             x, y, w, h = res['box']
             conf = res['conf']
             
-            # 顔の描画
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(frame, f"Face {conf:.2f}", (x, y - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            if res == matched_face:
+                # ターゲット
+                color = (0, 0, 255) # 赤
+                text = f"Target {conf:.2f}"
+                closest_person_cx = x + w / 2
+                closest_person_cy = y + h / 2
+            else:
+                # その他の顔
+                color = (0, 255, 0) # 緑
+                text = f"Face {conf:.2f}"
             
-            # 追跡ロジック (顔優先)
-            cx = x + w / 2
-            cy = y + h / 2
-            dist = abs(cx - frame_center_x)
-            if dist < min_dist_from_center:
-                min_dist_from_center = dist
-                closest_person_cx = cx
-                closest_person_cy = cy
+            # 顔の描画
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(frame, text, (x, y - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
         # --- OpenVINO物体検出の結果描画 ---
+        min_dist_from_center = float('inf') # Reset for body search fallback
+
         for res in results:
             x, y, w, h = res['box']
             confidence = res['confidence']
