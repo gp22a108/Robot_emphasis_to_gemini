@@ -539,9 +539,14 @@ class YOLOOptimizer:
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
                 if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
                     print(f" >> 通知: 大きな人物を検出しました (高さ: {h}px)")
+                    should_update_time = True
                     if self.on_detection:
-                        self.on_detection()
-                    self.last_detection_time = current_time
+                        # コールバックが False を返したら時間を更新しない（Gemini準備中など）
+                        if self.on_detection() is False:
+                            should_update_time = False
+                    
+                    if should_update_time:
+                        self.last_detection_time = current_time
 
             color = (255, 0, 0) # 人物は青色で描画
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)

@@ -232,10 +232,14 @@ class AudioLoop:
             
         print("[Gemini] Person detected! Activating microphone.")
         self.mic_is_active.set()
-        await self.session.send_client_content(
-            turns=self._user_turn("Detected"),
-            turn_complete=True,
-        )
+        try:
+            await self.session.send_client_content(
+                turns=self._user_turn("Detected"),
+                turn_complete=True,
+            )
+        except Exception as e:
+            print(f"[Gemini] Failed to send detection trigger: {e}")
+            self.mic_is_active.clear()
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
@@ -581,7 +585,8 @@ class AudioLoop:
                             should_resume_mic = False # マイク再開を抑制
                             if self.yolo_detector:
                                 # 15秒間検出をブロックするように last_detection_time を設定
-                                self.yolo_detector.last_detection_time = time.time() - config.DETECTION_INTERVAL + 15
+                                # 確実に15秒後に反応できるように、計算上は少し短め(12秒)に設定する
+                                self.yolo_detector.last_detection_time = time.time() - config.DETECTION_INTERVAL + 12
                             
                             raise SessionResetException()
 
