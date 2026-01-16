@@ -108,8 +108,8 @@ class YOLOOptimizer:
         """低FPSモードの切り替え"""
         self.low_fps_mode = enabled
         if enabled:
-            self.target_fps = 3.0
-            print("[YOLO] Low FPS Mode: ON (3 FPS)")
+            self.target_fps = 1.0
+            print("[YOLO] Low FPS Mode: ON (1 FPS)")
         else:
             self.target_fps = 30.0
             print("[YOLO] Low FPS Mode: OFF (30 FPS)")
