@@ -217,6 +217,7 @@ class AudioLoop:
         # self.mic_is_active.set()
         print("[Gemini] Microphone initialized in MUTE state.")
         self.reset_trigger = False
+        self.detection_triggered = False
 
     @staticmethod
     def _user_turn(text: str):
@@ -228,12 +229,13 @@ class AudioLoop:
 
     async def _on_detected(self):
         """検出時の非同期処理"""
-        # 既にマイクがアクティブなら何もしない（重複ログ防止）
-        if self.mic_is_active.is_set():
+        # 既にマイクがアクティブ、または検出トリガー済みなら何もしない
+        if self.mic_is_active.is_set() or self.detection_triggered:
             return
             
-        print("[Gemini] Person detected! Activating microphone.")
-        self.mic_is_active.set()
+        print("[Gemini] Person detected! Sending trigger (Mic remains MUTED).")
+        self.detection_triggered = True
+        # self.mic_is_active.set() # 初回はマイクをオンにしない（Voicevox再生終了後にオンにする）
         
         # ログ記録: Geminiへの通知
         Logger.log_gemini_conversation("System", "Detected (Trigger sent to Gemini)")
@@ -245,7 +247,7 @@ class AudioLoop:
             )
         except Exception as e:
             print(f"[Gemini] Failed to send detection trigger: {e}")
-            self.mic_is_active.clear()
+            self.detection_triggered = False # 失敗したらリセット
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
@@ -424,6 +426,8 @@ class AudioLoop:
                     has_received_content = False
                     is_playing = False # 再生が開始されたかを管理するフラグ
                     full_response_text = []
+                    user_transcript_buffer = [] # ユーザー発話をまとめるためのバッファ
+                    print_user_header = True # ユーザー発話ヘッダーを表示するかどうかのフラグ
                     
                     # サーバーからのレスポンス受信ループ
                     # async for を直接使うとブロックされるので、anext() を使って制御する
@@ -475,6 +479,18 @@ class AudioLoop:
 
                             server_content = getattr(response, "server_content", None)
                             if server_content is not None:
+                                input_tx = getattr(server_content, "input_transcription", None)
+                                if input_tx:
+                                    input_text = getattr(input_tx, "text", None)
+                                    if input_text:
+                                        # リアルタイム表示
+                                        if print_user_header:
+                                            print(f"\nUser > ", end="", flush=True)
+                                            print_user_header = False
+                                        
+                                        print(input_text, end="", flush=True)
+                                        user_transcript_buffer.append(input_text) # バッファに追加
+
                                 if getattr(server_content, "generation_complete", False): #geminiから生成される音声を使用したフラグ判定を行いたい場合は、turn_completeを使う。
                                     # サーバー側が完了と言ってきたら終了
                                     pass
@@ -501,8 +517,21 @@ class AudioLoop:
 
                             if not has_received_content:
                                 has_received_content = True
+                                
+                                # ユーザー発話の表示が終わったので改行
+                                if not print_user_header: # ヘッダーが表示されていた＝何か出力された
+                                    print() 
+                                    print_user_header = True
+
                                 self.mic_is_active.clear()
                                 print("\n--- Mic paused while speaking ---")
+                                
+                                # ユーザー発話がバッファにあればまとめてログ出力
+                                if user_transcript_buffer:
+                                    combined_transcript = "".join(user_transcript_buffer)
+                                    # print(f"[Gemini] User Transcript: {combined_transcript}") # リアルタイム表示済みなので削除
+                                    Logger.log_gemini_conversation("User (Audio)", combined_transcript)
+                                    user_transcript_buffer = [] # バッファをクリア
                                 
                                 await asyncio.to_thread(update_pose, "thinking")
 
@@ -566,6 +595,16 @@ class AudioLoop:
                                 break
 
                     # --- TURN IS COMPLETE ---
+                    # 残りのトランスクリプトがあれば出力
+                    if user_transcript_buffer:
+                        if not print_user_header:
+                             print()
+                        
+                        combined_transcript = "".join(user_transcript_buffer)
+                        # print(f"[Gemini] User Transcript: {combined_transcript}")
+                        Logger.log_gemini_conversation("User (Audio)", combined_transcript)
+                        user_transcript_buffer = []
+
                     if has_received_content:
                         final_text = "".join(full_response_text)
                         
@@ -703,6 +742,7 @@ class AudioLoop:
             base_config = {
                 "response_modalities": response_modalities,
                 "output_audio_transcription": {},
+                "input_audio_transcription": {},
                 "system_instruction": self.system_instruction,
             }
 
@@ -732,6 +772,7 @@ class AudioLoop:
 
             async def start_session(live_config):
                 self.reset_trigger = False
+                self.detection_triggered = False
                 async with (
                     client.aio.live.connect(model=MODEL, config=live_config) as session,
                     asyncio.TaskGroup() as tg,
