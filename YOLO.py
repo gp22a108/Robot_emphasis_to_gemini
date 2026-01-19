@@ -9,6 +9,8 @@ import requests
 
 # 設定ファイルをインポート
 import config
+# ログ機能をインポート
+import Logger
 
 # ==========================================
 # 遅延読み込み用のグローバル変数
@@ -512,6 +514,9 @@ class YOLOOptimizer:
 
         # --- OpenVINO物体検出の結果描画 ---
         min_dist_from_center = float('inf') # Reset for body search fallback
+        
+        # 人数カウント用
+        person_count = 0
 
         for res in results:
             x, y, w, h = res['box']
@@ -520,6 +525,7 @@ class YOLOOptimizer:
             label = config.CLASSES.get(class_id, 'Unknown')
 
             if label == 'person':
+                person_count += 1
                 # 通知用のロジック (既存)
                 if h > PERSON_HEIGHT_THRESHOLD:
                     if h > best_h:
@@ -539,6 +545,25 @@ class YOLOOptimizer:
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
                 if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
                     print(f" >> 通知: 大きな人物を検出しました (高さ: {h}px)")
+                    
+                    # ログ記録: 検出イベント (人数を追加)
+                    # ここではループ内で複数回呼ばれる可能性があるが、
+                    # DETECTION_INTERVAL で制御されているので、
+                    # 1回の通知イベントにつき1回だけログされるはず。
+                    # ただし、このループは検出されたオブジェクトごとになので、
+                    # 厳密には「通知対象の人物」が見つかった最初の1回でログしたい。
+                    # 現状のロジックだと、通知対象の人物が複数いると複数回ログされる可能性があるが、
+                    # last_detection_time の更新が直後に行われるため、実質1回になる。
+                    
+                    # person_count はこのフレーム全体の人数なので、それを渡す。
+                    # ただし、このループの時点では person_count はまだ途中経過の可能性がある。
+                    # 正確な人数を知るには、ループを2回回すか、リスト内包表記で先に数える必要がある。
+                    
+                    # 修正: 先に人数を数える
+                    current_person_count = sum(1 for r in results if config.CLASSES.get(r['class_id']) == 'person')
+                    
+                    Logger.log_yolo_event(f"Person detected (Height: {h}px)", person_count=current_person_count)
+
                     should_update_time = True
                     if self.on_detection:
                         # コールバックが False を返したら時間を更新しない（Gemini準備中など）

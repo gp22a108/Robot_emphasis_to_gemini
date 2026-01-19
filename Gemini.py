@@ -34,6 +34,8 @@ import requests
 
 # 設定ファイル
 import config
+# ログ機能
+import Logger
 
 # 遅延インポート用の変数を定義
 genai = None
@@ -232,6 +234,10 @@ class AudioLoop:
             
         print("[Gemini] Person detected! Activating microphone.")
         self.mic_is_active.set()
+        
+        # ログ記録: Geminiへの通知
+        Logger.log_gemini_conversation("System", "Detected (Trigger sent to Gemini)")
+        
         try:
             await self.session.send_client_content(
                 turns=self._user_turn("Detected"),
@@ -255,6 +261,10 @@ class AudioLoop:
             text = await asyncio.to_thread(input, "message > ")
             if text.lower() == "q":
                 break
+            
+            # ログ記録: ユーザー入力
+            Logger.log_gemini_conversation("User (Console)", text)
+            
             await self.session.send_client_content(
                 turns=self._user_turn(text or "."),
                 turn_complete=True,
@@ -345,6 +355,10 @@ class AudioLoop:
                 # 30秒以上人が検出されていない場合
                 if time.time() - last_seen > 30:
                     print("[Gemini] No person seen for 30s. Resetting session.")
+                    
+                    # ログ記録: タイムアウト
+                    Logger.log_interaction_result("Timeout (No person seen for 30s)")
+                    
                     self.yolo_detector.last_detection_time = 0 # Ensure we can detect immediately
                     self.reset_trigger = True
                     raise SessionResetException()
@@ -378,6 +392,9 @@ class AudioLoop:
                             from Capture import take_picture  # 遅延インポート
                             frame_to_capture = self.yolo_detector.get_current_frame()
                             await asyncio.to_thread(take_picture, frame_to_capture, 0)
+                            
+                            # ログ記録: 写真撮影
+                            Logger.log_interaction_result("Picture Taken")
 
                             # Send prompt
                             print("[Gemini] Sending post-capture praise prompt.")
@@ -552,6 +569,9 @@ class AudioLoop:
                     if has_received_content:
                         final_text = "".join(full_response_text)
                         
+                        # ログ記録: Geminiの応答
+                        Logger.log_gemini_conversation("Gemini", final_text)
+                        
                         if "[CAPTURE_IMAGE]" in final_text:
                             if config.USE_VOICEVOX and player:
                                 if not player.on_last_chunk_start:
@@ -582,6 +602,10 @@ class AudioLoop:
                         # End_Talk の処理を再生完了後に移動
                         if end_talk_detected:
                             print("\n[Gemini] End of conversation detected. Enforcing 15s cooldown.")
+                            
+                            # ログ記録: 会話終了
+                            Logger.log_interaction_result("Conversation Ended (End_Talk)")
+
                             should_resume_mic = False # マイク再開を抑制
                             if self.yolo_detector:
                                 # 15秒間検出をブロックするように last_detection_time を設定
