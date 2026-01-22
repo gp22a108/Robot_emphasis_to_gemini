@@ -502,22 +502,6 @@ class YOLOOptimizer:
                 text = f"Target {conf:.2f}"
                 closest_person_cx = x + w / 2
                 closest_person_cy = y + h / 2
-                
-                # 顔検出時に通知を行うロジック
-                if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
-                    print(f" >> 通知: 顔を検出しました (Confidence: {conf:.2f})")
-                    
-                    # ログ記録: 検出イベント
-                    Logger.log_yolo_event(f"Face detected (Confidence: {conf:.2f})", person_count=len(face_results))
-
-                    should_update_time = True
-                    if self.on_detection:
-                        # コールバックが False を返したら時間を更新しない（Gemini準備中など）
-                        if self.on_detection() is False:
-                            should_update_time = False
-                    
-                    if should_update_time:
-                        self.last_detection_time = current_time
             else:
                 # その他の顔
                 color = (0, 255, 0) # 緑
@@ -542,6 +526,12 @@ class YOLOOptimizer:
 
             if label == 'person':
                 person_count += 1
+                # 通知用のロジック (既存)
+                if h > PERSON_HEIGHT_THRESHOLD:
+                    if h > best_h:
+                        best_h = h
+                        person_center_x = x + w / 2
+
                 # 顔が検出されなかった場合のフォールバック追跡
                 if closest_person_cx is None:
                     cx = x + w / 2
@@ -552,6 +542,37 @@ class YOLOOptimizer:
                         closest_person_cx = cx
                         closest_person_cy = cy
 
+            if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
+                if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
+                    print(f" >> 通知: 大きな人物を検出しました (高さ: {h}px)")
+
+                    # ログ記録: 検出イベント (人数を追加)
+                    # ここではループ内で複数回呼ばれる可能性があるが、
+                    # DETECTION_INTERVAL で制御されているので、
+                    # 1回の通知イベントにつき1回だけログされるはず。
+                    # ただし、このループは検出されたオブジェクトごとになので、
+                    # 厳密には「通知対象の人物」が見つかった最初の1回でログしたい。
+                    # 現状のロジックだと、通知対象の人物が複数いると複数回ログされる可能性があるが、
+                    # last_detection_time の更新が直後に行われるため、実質1回になる。
+
+                    # person_count はこのフレーム全体の人数なので、それを渡す。
+                    # ただし、このループの時点では person_count はまだ途中経過の可能性がある。
+                    # 正確な人数を知るには、ループを2回回すか、リスト内包表記で先に数える必要がある。
+
+                    # 修正: 先に人数を数える
+                    current_person_count = sum(1 for r in results if config.CLASSES.get(r['class_id']) == 'person')
+
+                    Logger.log_yolo_event(f"Person detected (Height: {h}px)", person_count=current_person_count)
+
+                    should_update_time = True
+                    if self.on_detection:
+                        # コールバックが False を返したら時間を更新しない（Gemini準備中など）
+                        if self.on_detection() is False:
+                            should_update_time = False
+
+                    if should_update_time:
+                        self.last_detection_time = current_time
+
             color = (255, 0, 0) # 人物は青色で描画
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
 
@@ -561,7 +582,7 @@ class YOLOOptimizer:
             cv2.putText(frame, label_text, (x, y - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
-        if len(face_results) > 0 or person_count > 0:
+        if best_h > 0 and person_center_x is not None:
             self.last_person_seen_time = current_time
 
         # ロボット追跡コマンドの送信
