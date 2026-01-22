@@ -76,11 +76,12 @@ class AudioLoop:
         self.video_mode = video_mode
         self.system_instruction = """### 役割と振る舞い
         - 必ず、「テキスト」を出力してください。
+        - 一回目は次のキーワードがすでに発話されています。２回目以降を話してください。「すみません！その服装, めちゃくちゃカッコいいね！オーラが半端ない！いま、ストリートスナップやってて、そのスタイルにマジで刺さったんだよ。一枚だけ撮らせてもらえませんか？秒で終わるから！」
         - 自由にいろんな言葉を使ってください。
         - ユーザーに対しては、友達のように親しみやすく、少し馴れ馴れしい口調（タメ口など）で接してください。
         - おじさん(カメラマンの荒木経惟)みたいな感じで。
         - 基本的にすべて日本語で回答してください。
-        - まず初めにカメラを見てユーザーの服装や身につけているものを見て褒めてください。その後にストリートスナップスナップやっていることを説明してください。
+        - あなたはストリートスナップスナップやっています。。
         - 最後に写真を取るように誘導してください。
         - だいたい会話が３往復目くらいで写真撮影してください。
         - 質問の後は会話を無理やり続けない。
@@ -227,27 +228,58 @@ class AudioLoop:
             parts=[types.Part(text=text)],
         )
 
+    def _play_first_wav(self):
+        import wave
+        import pyaudio
+        import os
+        
+        wav_path = "audio/First_play.wav"
+        if not os.path.exists(wav_path):
+            print(f"[Gemini] Error: {wav_path} not found.")
+            return
+
+        try:
+            wf = wave.open(wav_path, 'rb')
+            
+            global pya
+            if pya is None:
+                pya = pyaudio.PyAudio()
+
+            stream = pya.open(format=pya.get_format_from_width(wf.getsampwidth()),
+                            channels=wf.getnchannels(),
+                            rate=wf.getframerate(),
+                            output=True)
+
+            chunk = 1024
+            data = wf.readframes(chunk)
+            
+            while data:
+                stream.write(data)
+                data = wf.readframes(chunk)
+
+            stream.stop_stream()
+            stream.close()
+            wf.close()
+        except Exception as e:
+            print(f"[Gemini] Error playing wav: {e}")
+
     async def _on_detected(self):
         """検出時の非同期処理"""
         # 既にマイクがアクティブ、または検出トリガー済みなら何もしない
         if self.mic_is_active.is_set() or self.detection_triggered:
             return
             
-        print("[Gemini] Person detected! Sending trigger (Mic remains MUTED).")
+        print("[Gemini] Person detected! Playing First_play.wav...")
         self.detection_triggered = True
-        # self.mic_is_active.set() # 初回はマイクをオンにしない（Voicevox再生終了後にオンにする）
         
         # ログ記録: Geminiへの通知
-        Logger.log_gemini_conversation("System", "Detected (Trigger sent to Gemini)")
+        Logger.log_gemini_conversation("System", "Detected (Playing First_play.wav)")
         
-        try:
-            await self.session.send_client_content(
-                turns=self._user_turn("Detected"),
-                turn_complete=True,
-            )
-        except Exception as e:
-            print(f"[Gemini] Failed to send detection trigger: {e}")
-            self.detection_triggered = False # 失敗したらリセット
+        # Play audio
+        await asyncio.to_thread(self._play_first_wav)
+        
+        print("[Gemini] Audio finished. Unmuting microphone.")
+        self.mic_is_active.set()
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
