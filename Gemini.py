@@ -219,6 +219,7 @@ class AudioLoop:
         print("[Gemini] Microphone initialized in MUTE state.")
         self.reset_trigger = False
         self.detection_triggered = False
+        self.session_active = asyncio.Event() # セッションがアクティブかどうかを管理するイベント
 
     @staticmethod
     def _user_turn(text: str):
@@ -239,6 +240,7 @@ class AudioLoop:
             return
 
         try:
+            print(f"[Gemini] Playing {wav_path}...")
             wf = wave.open(wav_path, 'rb')
             
             global pya
@@ -257,25 +259,33 @@ class AudioLoop:
                 stream.write(data)
                 data = wf.readframes(chunk)
 
+            # 少し待ってからストリームを閉じる（バッファの再生完了待ち）
+            time.sleep(0.2)
             stream.stop_stream()
             stream.close()
             wf.close()
+            print(f"[Gemini] Finished playing {wav_path}.")
         except Exception as e:
             print(f"[Gemini] Error playing wav: {e}")
+            traceback.print_exc()
 
     async def _on_detected(self):
         """検出時の非同期処理"""
-        # 既にマイクがアクティブ、または検出トリガー済みなら何もしない
-        if self.mic_is_active.is_set() or self.detection_triggered:
+        # 既にセッションがアクティブなら何もしない
+        if self.session_active.is_set():
             return
             
-        print("[Gemini] Person detected! Playing First_play.wav...")
+        print("[Gemini] Person detected! Starting session AND playing First_play.wav...")
         self.detection_triggered = True
         
         # ログ記録: Geminiへの通知
         Logger.log_gemini_conversation("System", "Detected (Playing First_play.wav)")
         
-        # Play audio
+        # 1. Start Session Connection immediately (Trigger main loop)
+        print("[Gemini] Triggering session start...")
+        self.session_active.set() 
+        
+        # 2. Play audio concurrently (Blocking in thread)
         await asyncio.to_thread(self._play_first_wav)
         
         print("[Gemini] Audio finished. Unmuting microphone.")
@@ -283,7 +293,7 @@ class AudioLoop:
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
-        if self.session and self.loop:
+        if self.loop:
             asyncio.run_coroutine_threadsafe(
                 self._on_detected(),
                 self.loop,
@@ -299,10 +309,11 @@ class AudioLoop:
             # ログ記録: ユーザー入力
             Logger.log_gemini_conversation("User (Console)", text)
             
-            await self.session.send_client_content(
-                turns=self._user_turn(text or "."),
-                turn_complete=True,
-            )
+            if self.session:
+                await self.session.send_client_content(
+                    turns=self._user_turn(text or "."),
+                    turn_complete=True,
+                )
 
     def _get_screen_jpeg_bytes(self) -> bytes:
         """画面キャプチャを 1 フレーム取得して JPEG bytes にする"""
@@ -342,6 +353,11 @@ class AudioLoop:
         """マイクから音声を取得して out_queue に投入"""
         global pya, pyaudio
         
+        # マイクが有効になるまで待機（音声再生中はマイクを掴まないため）
+        print("[Gemini] listen_audio: Waiting for mic to become active...")
+        await self.mic_is_active.wait()
+        print("[Gemini] listen_audio: Mic active, opening stream...")
+
         # 音声ライブラリの遅延インポート
         if pyaudio is None:
             import pyaudio
@@ -831,6 +847,11 @@ class AudioLoop:
                 return False
 
             while True:
+                # セッション開始待機
+                print("[Gemini] Waiting for person detection to start session...")
+                self.session_active.clear()
+                await self.session_active.wait()
+                
                 try:
                     # 接続試行
                     if vad_config:
@@ -839,7 +860,12 @@ class AudioLoop:
                             await start_session(config_with_vad)
                         except Exception as e:
                             if is_reset_exception(e):
-                                raise SessionResetException() from e
+                                # セッションリセット時はループの先頭に戻り、再度検出待ちになる
+                                print("[Gemini] Session ended. Returning to detection wait state.")
+                                self.session_active.clear()
+                                self.detection_triggered = False
+                                self.mic_is_active.clear()
+                                continue
                             
                             # ValidationError かどうかを判定 (型名やメッセージで)
                             error_str = str(e)
@@ -855,12 +881,18 @@ class AudioLoop:
                     break # Normal exit
 
                 except SessionResetException:
-                    print("[Gemini] Session reset requested. Restarting session...")
+                    print("[Gemini] Session ended. Returning to detection wait state.")
+                    self.session_active.clear()
+                    self.detection_triggered = False
+                    self.mic_is_active.clear()
                     await asyncio.sleep(1)
                     continue
                 except Exception as e:
                     if is_reset_exception(e):
-                        print("[Gemini] Session reset requested. Restarting session...")
+                        print("[Gemini] Session ended. Returning to detection wait state.")
+                        self.session_active.clear()
+                        self.detection_triggered = False
+                        self.mic_is_active.clear()
                         await asyncio.sleep(1)
                         continue
                     
