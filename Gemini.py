@@ -472,7 +472,12 @@ class AudioLoop:
 
                 # 再生状態を監視するタスク
                 async def monitor_playback(p):
+                    started = False
                     while True:
+                        if not started and p.has_started_playing:
+                            started = True
+                            await asyncio.to_thread(update_pose, "default")
+
                         if p.has_started_playing and not p.is_active:
                             # 再生が開始され、かつアクティブでなくなったら完了とみなす
                             playback_finished_event.set()
@@ -556,6 +561,11 @@ class AudioLoop:
                             if server_content is not None:
                                 input_tx = getattr(server_content, "input_transcription", None)
                                 if input_tx:
+                                    # 新しいターンが始まったとみなしてフラグをリセット
+                                    if has_received_content:
+                                        has_received_content = False
+                                        is_playing = False
+                                    
                                     input_text = getattr(input_tx, "text", None)
                                     if input_text:
                                         # リアルタイム表示
@@ -587,6 +597,8 @@ class AudioLoop:
 
                             if not text and not audio_data:
                                 if server_content and getattr(server_content, "turn_complete", False):
+                                    # ユーザー発話終了とみなして考え中ポーズへ
+                                    await asyncio.to_thread(update_pose, "thinking")
                                     break
                                 continue
 
@@ -627,6 +639,8 @@ class AudioLoop:
                                     if not player.is_connected:
                                         print(f"\n[Warning] Voicevoxへの接続に失敗しました。音声再生をスキップします。")
                                         player = None
+                                        is_playing = True
+                                        await asyncio.to_thread(update_pose, "default")
                                     else:
                                         # 監視タスクを開始
                                         monitor_task = asyncio.create_task(monitor_playback(player))
@@ -647,7 +661,9 @@ class AudioLoop:
                             
                             if has_received_content and not is_playing:
                                 is_playing = True
-                                await asyncio.to_thread(update_pose, "default")
+                                # Voicevoxの場合は再生開始時にdefaultに戻すため、ここでは戻さない
+                                if not config.USE_VOICEVOX:
+                                    await asyncio.to_thread(update_pose, "default")
 
                             if text:
                                 full_response_text.append(text)
@@ -713,6 +729,9 @@ class AudioLoop:
                                         end_talk_detected = True
                             
                             if not config.USE_VOICEVOX and audio_out_stream and audio_data:
+                                if not is_playing:
+                                    is_playing = True
+                                    await asyncio.to_thread(update_pose, "default")
                                 await asyncio.to_thread(audio_out_stream.write, audio_data)
                             
                             if server_content and getattr(server_content, "generation_complete", False): #geminiから生成される音声を使用したフラグ判定を行いたい場合は、turn_completeを使う。
@@ -728,6 +747,9 @@ class AudioLoop:
                         # print(f"[Gemini] User Transcript: {combined_transcript}")
                         Logger.log_gemini_conversation("User (Audio)", combined_transcript)
                         user_transcript_buffer = []
+
+                        # ユーザー発話終了後、考え中ポーズに移行
+                        await asyncio.to_thread(update_pose, "thinking")
                         
                         # ユーザー発話が確定した時点で、応答待ちタイマーを開始
                         if not has_received_content:
