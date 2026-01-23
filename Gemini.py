@@ -394,7 +394,7 @@ class AudioLoop:
                 )
 
     async def monitor_timeout(self):
-        """60秒間人が検出されなかったらリセットする監視タスク"""
+        """人が検出されなかったらリセットする監視タスク"""
         print("[Gemini] Timeout monitor started.")
         session_start_time = time.time()
         while True:
@@ -406,12 +406,12 @@ class AudioLoop:
                 if last_seen < session_start_time:
                     continue
 
-                # 3秒以上人が検出されていない場合
-                if time.time() - last_seen > 3:
-                    print("[Gemini] No person seen for 3s. Resetting session.")
+                # 設定された時間以上人が検出されていない場合
+                if time.time() - last_seen > config.SESSION_TIMEOUT_SECONDS:
+                    print(f"[Gemini] No person seen for {config.SESSION_TIMEOUT_SECONDS}s. Resetting session.")
                     
                     # ログ記録: タイムアウト
-                    Logger.log_interaction_result("Timeout (No person seen for 3s)")
+                    Logger.log_interaction_result(f"Timeout (No person seen for {config.SESSION_TIMEOUT_SECONDS}s)")
                     
                     self.yolo_detector.last_detection_time = 0 # Ensure we can detect immediately
                     self.reset_trigger = True
@@ -423,6 +423,7 @@ class AudioLoop:
 
         audio_out_stream = None
         next_packet_task = None # タスク管理用変数を初期化
+        response_timer_task = None # 応答待ちタイマー
 
         try:
             while True:
@@ -499,11 +500,25 @@ class AudioLoop:
                         # 再生完了を待つタスク（イベント）
                         wait_playback_task = asyncio.create_task(playback_finished_event.wait())
                         
-                        # どちらかが完了するのを待つ
+                        # 待機タスクのリスト
+                        tasks_to_wait = [next_packet_task, wait_playback_task]
+                        
+                        # 応答待ちタイマーがあれば追加
+                        if response_timer_task:
+                            tasks_to_wait.append(response_timer_task)
+
+                        # 完了を待つ
                         done, pending = await asyncio.wait(
-                            [next_packet_task, wait_playback_task],
+                            tasks_to_wait,
                             return_when=asyncio.FIRST_COMPLETED
                         )
+
+                        # 応答待ちタイマーが発火した場合
+                        if response_timer_task in done:
+                            print(f"\n[Gemini] Response timeout ({config.RESPONSE_TIMEOUT_SECONDS}s). Resetting session.")
+                            Logger.log_interaction_result("Response Timeout")
+                            self.reset_trigger = True
+                            raise SessionResetException()
 
                         # 再生完了イベントが発火した場合
                         if wait_playback_task in done:
@@ -577,6 +592,11 @@ class AudioLoop:
 
                             if not has_received_content:
                                 has_received_content = True
+                                
+                                # 応答が来たのでタイマーをキャンセル
+                                if response_timer_task:
+                                    response_timer_task.cancel()
+                                    response_timer_task = None
                                 
                                 # ユーザー発話の表示が終わったので改行
                                 if not print_user_header: # ヘッダーが表示されていた＝何か出力された
@@ -708,6 +728,12 @@ class AudioLoop:
                         # print(f"[Gemini] User Transcript: {combined_transcript}")
                         Logger.log_gemini_conversation("User (Audio)", combined_transcript)
                         user_transcript_buffer = []
+                        
+                        # ユーザー発話が確定した時点で、応答待ちタイマーを開始
+                        if not has_received_content:
+                            if response_timer_task:
+                                response_timer_task.cancel()
+                            response_timer_task = asyncio.create_task(asyncio.sleep(config.RESPONSE_TIMEOUT_SECONDS))
 
                     if has_received_content:
                         final_text = "".join(full_response_text)
@@ -750,6 +776,9 @@ class AudioLoop:
                 finally:
                     if monitor_task:
                         monitor_task.cancel()
+                    
+                    if response_timer_task:
+                        response_timer_task.cancel()
                     
                     if self.reset_trigger:
                         should_resume_mic = False
@@ -911,6 +940,9 @@ class AudioLoop:
                                 self.session_active.clear()
                                 self.detection_triggered = False
                                 self.mic_is_active.clear()
+                                # YOLOの通知フラグをリセット
+                                if self.yolo_detector:
+                                    self.yolo_detector.reset_notification_flag()
                                 continue
                             
                             # ValidationError かどうかを判定 (型名やメッセージで)
@@ -931,6 +963,9 @@ class AudioLoop:
                                 self.session_active.clear()
                                 self.detection_triggered = False
                                 self.mic_is_active.clear()
+                                # YOLOの通知フラグをリセット
+                                if self.yolo_detector:
+                                    self.yolo_detector.reset_notification_flag()
                                 await asyncio.sleep(5)
                                 continue
                             else:
@@ -950,6 +985,9 @@ class AudioLoop:
                             self.session_active.clear()
                             self.detection_triggered = False
                             self.mic_is_active.clear()
+                            # YOLOの通知フラグをリセット
+                            if self.yolo_detector:
+                                self.yolo_detector.reset_notification_flag()
                             await asyncio.sleep(5)
                             continue
                     
@@ -967,6 +1005,9 @@ class AudioLoop:
                     self.session_active.clear()
                     self.detection_triggered = False
                     self.mic_is_active.clear()
+                    # YOLOの通知フラグをリセット
+                    if self.yolo_detector:
+                        self.yolo_detector.reset_notification_flag()
                     await asyncio.sleep(1)
                     continue
                 except Exception as e:
@@ -982,6 +1023,9 @@ class AudioLoop:
                         self.session_active.clear()
                         self.detection_triggered = False
                         self.mic_is_active.clear()
+                        # YOLOの通知フラグをリセット
+                        if self.yolo_detector:
+                            self.yolo_detector.reset_notification_flag()
                         await asyncio.sleep(1)
                         continue
                     
@@ -1000,6 +1044,9 @@ class AudioLoop:
                         self.session_active.clear()
                         self.detection_triggered = False
                         self.mic_is_active.clear()
+                        # YOLOの通知フラグをリセット
+                        if self.yolo_detector:
+                            self.yolo_detector.reset_notification_flag()
                         await asyncio.sleep(5)
                         continue
                     
@@ -1018,6 +1065,9 @@ class AudioLoop:
                     self.session_active.clear()
                     self.detection_triggered = False
                     self.mic_is_active.clear()
+                    # YOLOの通知フラグをリセット
+                    if self.yolo_detector:
+                        self.yolo_detector.reset_notification_flag()
                     await asyncio.sleep(5)
                     continue
 

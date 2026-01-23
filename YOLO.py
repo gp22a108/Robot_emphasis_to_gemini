@@ -102,6 +102,9 @@ class YOLOOptimizer:
         # ターゲット追跡用
         self.target_box = None
 
+        # 通知済みフラグ
+        self.has_notified_in_session = False
+
     def is_ready(self):
         """初期化が完了したかどうかを返す"""
         return self.is_ready_event.is_set()
@@ -115,6 +118,11 @@ class YOLOOptimizer:
         else:
             self.target_fps = 30.0
             print("[YOLO] Low FPS Mode: OFF (30 FPS)")
+
+    def reset_notification_flag(self):
+        """通知済みフラグをリセットする（セッション終了時などに呼ぶ）"""
+        self.has_notified_in_session = False
+        print("[YOLO] Notification flag reset.")
 
     def _initialize_dependencies(self):
         """依存ライブラリとモデルの初期化（別スレッドで実行）"""
@@ -543,35 +551,27 @@ class YOLOOptimizer:
                         closest_person_cy = cy
 
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
-                if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
-                    print(f" >> 通知: 大きな人物を検出しました (高さ: {h}px)")
+                # 通知済みフラグをチェック
+                if not self.has_notified_in_session:
+                    if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
+                        print(f" >> 通知: 大きな人物を検出しました (高さ: {h}px)")
 
-                    # ログ記録: 検出イベント (人数を追加)
-                    # ここではループ内で複数回呼ばれる可能性があるが、
-                    # DETECTION_INTERVAL で制御されているので、
-                    # 1回の通知イベントにつき1回だけログされるはず。
-                    # ただし、このループは検出されたオブジェクトごとになので、
-                    # 厳密には「通知対象の人物」が見つかった最初の1回でログしたい。
-                    # 現状のロジックだと、通知対象の人物が複数いると複数回ログされる可能性があるが、
-                    # last_detection_time の更新が直後に行われるため、実質1回になる。
+                        # 修正: 先に人数を数える
+                        current_person_count = sum(1 for r in results if config.CLASSES.get(r['class_id']) == 'person')
 
-                    # person_count はこのフレーム全体の人数なので、それを渡す。
-                    # ただし、このループの時点では person_count はまだ途中経過の可能性がある。
-                    # 正確な人数を知るには、ループを2回回すか、リスト内包表記で先に数える必要がある。
+                        Logger.log_yolo_event(f"Person detected (Height: {h}px)", person_count=current_person_count)
 
-                    # 修正: 先に人数を数える
-                    current_person_count = sum(1 for r in results if config.CLASSES.get(r['class_id']) == 'person')
+                        should_update_time = True
+                        if self.on_detection:
+                            # コールバックが False を返したら時間を更新しない（Gemini準備中など）
+                            if self.on_detection() is False:
+                                should_update_time = False
+                            else:
+                                # 通知成功時、フラグを立てる
+                                self.has_notified_in_session = True
 
-                    Logger.log_yolo_event(f"Person detected (Height: {h}px)", person_count=current_person_count)
-
-                    should_update_time = True
-                    if self.on_detection:
-                        # コールバックが False を返したら時間を更新しない（Gemini準備中など）
-                        if self.on_detection() is False:
-                            should_update_time = False
-
-                    if should_update_time:
-                        self.last_detection_time = current_time
+                        if should_update_time:
+                            self.last_detection_time = current_time
 
             color = (255, 0, 0) # 人物は青色で描画
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)

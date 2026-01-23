@@ -18,7 +18,14 @@ CONFIDENCE_THRESHOLD = 0.5
 # Non-Maximum Suppression (NMS) のしきい値
 NMS_THRESHOLD = 0.5
 # 同じ物体を再検出するまでの待機時間 (秒)
-DETECTION_INTERVAL = 180.0
+# Gemini側でセッション管理しているため、YOLO側での制限はほぼなくす
+DETECTION_INTERVAL = 1.0
+
+# --- セッション・タイムアウト設定 ---
+# 人物が検出されなくなってからセッションを終了するまでの時間 (秒)
+SESSION_TIMEOUT_SECONDS = 3
+# ユーザー発話後、Geminiからの応答を待つ最大時間 (秒)
+RESPONSE_TIMEOUT_SECONDS = 10
 
 # --- クラス定義 ---
 CLASSES = {
@@ -62,7 +69,7 @@ MAX_WORKERS = 1
 # 発話終了とみなすまでの無音時間 (ミリ秒)
 # 値を小さくすると、発話終了の判定が早くなります（キレが良い）。
 # 値を大きくすると、発話終了の判定が遅くなります（間を許容する）。
-SPEECH_SILENCE_DURATION_MS = 50
+SPEECH_SILENCE_DURATION_MS = 200
 
 # 旧設定 (無効化)
 # VAD_POSITIVE_THRESHOLD = 0.0
