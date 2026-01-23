@@ -23,9 +23,10 @@ DETECTION_INTERVAL = 1.0
 
 # --- セッション・タイムアウト設定 ---
 # 人物が検出されなくなってからセッションを終了するまでの時間 (秒)
-SESSION_TIMEOUT_SECONDS = 3
+# 30秒に延長（移動中などのロスト対策）
+SESSION_TIMEOUT_SECONDS = 5
 # ユーザー発話後、Geminiからの応答を待つ最大時間 (秒)
-RESPONSE_TIMEOUT_SECONDS = 10
+RESPONSE_TIMEOUT_SECONDS = 20
 
 # --- クラス定義 ---
 CLASSES = {

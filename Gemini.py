@@ -269,6 +269,8 @@ class AudioLoop:
             stream.close()
             wf.close()
             print(f"[Gemini] Finished playing {wav_path}.")
+            # デバイス解放のための短い待機
+            time.sleep(0.5)
         except Exception as e:
             print(f"[Gemini] Error playing wav: {e}")
             traceback.print_exc()
@@ -292,6 +294,10 @@ class AudioLoop:
         # 2. Play audio concurrently (Blocking in thread)
         await asyncio.to_thread(self._play_first_wav)
         
+        # 発話終了直後は人がいるとみなしてタイマーをリセット
+        if self.yolo_detector:
+            self.yolo_detector.last_person_seen_time = time.time()
+
         print("[Gemini] Audio finished. Unmuting microphone.")
         self.mic_is_active.set()
 
@@ -355,6 +361,7 @@ class AudioLoop:
 
     async def listen_audio(self):
         """マイクから音声を取得して out_queue に投入"""
+        print("[Gemini] listen_audio: Task started.")
         global pya, pyaudio
         
         # マイクが有効になるまで待機（音声再生中はマイクを掴まないため）
@@ -396,22 +403,41 @@ class AudioLoop:
     async def monitor_timeout(self):
         """人が検出されなかったらリセットする監視タスク"""
         print("[Gemini] Timeout monitor started.")
-        session_start_time = time.time()
+        
+        # セッション開始時に last_person_seen_time を現在時刻に更新する。
+        # これにより、接続中に人がいなくなった場合でも、セッション開始時点からタイムアウト計測が始まる。
+        if self.yolo_detector:
+            self.yolo_detector.last_person_seen_time = time.time()
+
         while True:
             await asyncio.sleep(1.0)
+            
+            # マイクがミュート中（システム発話中など）はタイムアウト判定をスキップ
+            # if not self.mic_is_active.is_set():
+            #     continue
+
             if self.yolo_detector:
                 last_seen = self.yolo_detector.last_person_seen_time
                 
-                # セッション開始前の検出は無視（まだこのセッションで人を見ていない）
-                if last_seen < session_start_time:
+                # セッション開始前の検出は無視するロジックは削除
+                # if last_seen < session_start_time:
+                #     continue
+                
+                if last_seen == 0:
                     continue
 
+                elapsed = time.time() - last_seen
+                
+                # 5秒ごとに経過時間を表示 (デバッグ用)
+                if elapsed > 1.0 and int(elapsed) % 5 == 0:
+                     print(f"[Gemini] No person seen for {elapsed:.1f}s (Timeout: {config.SESSION_TIMEOUT_SECONDS}s)")
+
                 # 設定された時間以上人が検出されていない場合
-                if time.time() - last_seen > config.SESSION_TIMEOUT_SECONDS:
-                    print(f"[Gemini] No person seen for {config.SESSION_TIMEOUT_SECONDS}s. Resetting session.")
+                if elapsed > config.SESSION_TIMEOUT_SECONDS:
+                    print(f"[Gemini] No person seen for {elapsed:.1f}s. Resetting session.")
                     
                     # ログ記録: タイムアウト
-                    Logger.log_interaction_result(f"Timeout (No person seen for {config.SESSION_TIMEOUT_SECONDS}s)")
+                    Logger.log_interaction_result(f"Timeout (No person seen for {elapsed:.1f}s)")
                     
                     self.yolo_detector.last_detection_time = 0 # Ensure we can detect immediately
                     self.reset_trigger = True
@@ -808,6 +834,10 @@ class AudioLoop:
                         should_resume_mic = False
 
                     if should_resume_mic:
+                        # 発話終了直後は人がいるとみなしてタイマーをリセット
+                        # if self.yolo_detector:
+                        #     self.yolo_detector.last_person_seen_time = time.time()
+
                         self.mic_is_active.set()
                         print("--- Mic resumed ---")
                     else:
@@ -918,12 +948,14 @@ class AudioLoop:
             print(f"[Gemini] Audio Output Mode: {'VOICEVOX' if config.USE_VOICEVOX else 'GEMINI NATIVE'}")
 
             async def start_session(live_config):
+                print("[Gemini] Connecting to Live API...")
                 self.reset_trigger = False
                 self.detection_triggered = False
                 async with (
                     client.aio.live.connect(model=MODEL, config=live_config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
+                    print("[Gemini] Connected. Starting audio loops.")
                     self.session = session
                     self.out_queue = asyncio.Queue(maxsize=5)
 
@@ -949,6 +981,7 @@ class AudioLoop:
                 # セッション開始待機
                 print("[Gemini] Waiting for person detection to start session...")
                 self.session_active.clear()
+                self.mic_is_active.clear() # マイクを確実にOFFにする
                 await self.session_active.wait()
                 
                 try:

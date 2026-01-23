@@ -441,6 +441,7 @@ class YOLOOptimizer:
         current_time = time.time()
         detection_count = len(results)
         best_h = 0
+        max_person_h = 0
         person_center_x = None
 
         # 追跡用変数
@@ -451,6 +452,9 @@ class YOLOOptimizer:
         
         # ターゲット追跡ロジック (顔)
         matched_face = None
+        
+        # セッション維持判定用フラグ
+        person_detected_for_session = False
         
         # 1. 既存のターゲットを追跡
         if self.target_box is not None:
@@ -534,6 +538,14 @@ class YOLOOptimizer:
 
             if label == 'person':
                 person_count += 1
+                if h > max_person_h:
+                    max_person_h = h
+                
+                # セッション維持のための判定（厳しめ）
+                # 高さ 150px 以上、かつ 信頼度 0.60 以上
+                if h > 150 and confidence > 0.60:
+                    person_detected_for_session = True
+
                 # 通知用のロジック (既存)
                 if h > PERSON_HEIGHT_THRESHOLD:
                     if h > best_h:
@@ -582,8 +594,12 @@ class YOLOOptimizer:
             cv2.putText(frame, label_text, (x, y - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
-        if best_h > 0 and person_center_x is not None:
+        if person_detected_for_session:
             self.last_person_seen_time = current_time
+        else:
+            # 人が映っていない場合、last_person_seen_timeを更新しない
+            # これにより、Gemini側で「最後に人を見た時間」からの経過時間を計測できる
+            pass
 
         # ロボット追跡コマンドの送信
         if closest_person_cx is not None:
