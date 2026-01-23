@@ -476,7 +476,9 @@ class AudioLoop:
                     while True:
                         if not started and p.has_started_playing:
                             started = True
-                            await asyncio.to_thread(update_pose, "default")
+                            # 撮影待機中でなければ default に戻す
+                            if not capture_pending:
+                                await asyncio.to_thread(update_pose, "default")
 
                         if p.has_started_playing and not p.is_active:
                             # 再生が開始され、かつアクティブでなくなったら完了とみなす
@@ -597,8 +599,7 @@ class AudioLoop:
 
                             if not text and not audio_data:
                                 if server_content and getattr(server_content, "turn_complete", False):
-                                    # ユーザー発話終了とみなして考え中ポーズへ
-                                    await asyncio.to_thread(update_pose, "thinking")
+                                    # モデル発話終了
                                     break
                                 continue
 
@@ -749,7 +750,8 @@ class AudioLoop:
                         user_transcript_buffer = []
 
                         # ユーザー発話終了後、考え中ポーズに移行
-                        await asyncio.to_thread(update_pose, "thinking")
+                        if not capture_pending:
+                            await asyncio.to_thread(update_pose, "thinking")
                         
                         # ユーザー発話が確定した時点で、応答待ちタイマーを開始
                         if not has_received_content:
