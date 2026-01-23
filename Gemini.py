@@ -919,15 +919,51 @@ class AudioLoop:
                                 print(f"[Gemini] VAD settings not supported by this SDK version. Falling back to default.")
                                 # print(f"  -> Error details: {error_str.splitlines()[0]}...") # 最初の一行だけ表示 (抑制)
                                 await start_session(config_no_vad)
+                            elif isinstance(e, (TimeoutError, OSError)) or "TimeoutError" in type(e).__name__:
+                                print(f"[Gemini] Connection error: {e}. Retrying in 5 seconds...")
+                                if self.audio_stream:
+                                    try:
+                                        self.audio_stream.stop_stream()
+                                        self.audio_stream.close()
+                                    except Exception:
+                                        pass
+                                    self.audio_stream = None
+                                self.session_active.clear()
+                                self.detection_triggered = False
+                                self.mic_is_active.clear()
+                                await asyncio.sleep(5)
+                                continue
                             else:
                                 raise e
                     else:
-                        await start_session(config_no_vad)
+                        try:
+                            await start_session(config_no_vad)
+                        except (TimeoutError, OSError) as e:
+                            print(f"[Gemini] Connection error (No VAD): {e}. Retrying in 5 seconds...")
+                            if self.audio_stream:
+                                try:
+                                    self.audio_stream.stop_stream()
+                                    self.audio_stream.close()
+                                except Exception:
+                                    pass
+                                self.audio_stream = None
+                            self.session_active.clear()
+                            self.detection_triggered = False
+                            self.mic_is_active.clear()
+                            await asyncio.sleep(5)
+                            continue
                     
                     break # Normal exit
 
                 except SessionResetException:
                     print("[Gemini] Session ended. Returning to detection wait state.")
+                    if self.audio_stream:
+                        try:
+                            self.audio_stream.stop_stream()
+                            self.audio_stream.close()
+                        except Exception:
+                            pass
+                        self.audio_stream = None
                     self.session_active.clear()
                     self.detection_triggered = False
                     self.mic_is_active.clear()
@@ -936,6 +972,13 @@ class AudioLoop:
                 except Exception as e:
                     if is_reset_exception(e):
                         print("[Gemini] Session ended. Returning to detection wait state.")
+                        if self.audio_stream:
+                            try:
+                                self.audio_stream.stop_stream()
+                                self.audio_stream.close()
+                            except Exception:
+                                pass
+                            self.audio_stream = None
                         self.session_active.clear()
                         self.detection_triggered = False
                         self.mic_is_active.clear()
@@ -945,10 +988,38 @@ class AudioLoop:
                     if isinstance(e, asyncio.CancelledError):
                         break
                     
-                    if self.audio_stream:
-                        self.audio_stream.close()
+                    if isinstance(e, (TimeoutError, OSError)) or "TimeoutError" in type(e).__name__:
+                        print(f"[Gemini] Connection error (Outer): {e}. Retrying in 5 seconds...")
+                        if self.audio_stream:
+                            try:
+                                self.audio_stream.stop_stream()
+                                self.audio_stream.close()
+                            except Exception:
+                                pass
+                            self.audio_stream = None
+                        self.session_active.clear()
+                        self.detection_triggered = False
+                        self.mic_is_active.clear()
+                        await asyncio.sleep(5)
+                        continue
+                    
+                    print(f"[Gemini] Unexpected error: {e}")
                     traceback.print_exc()
-                    break
+                    print("[Gemini] Resetting session and retrying in 5 seconds...")
+                    
+                    if self.audio_stream:
+                        try:
+                            self.audio_stream.stop_stream()
+                            self.audio_stream.close()
+                        except Exception:
+                            pass
+                        self.audio_stream = None
+
+                    self.session_active.clear()
+                    self.detection_triggered = False
+                    self.mic_is_active.clear()
+                    await asyncio.sleep(5)
+                    continue
 
         except asyncio.CancelledError:
             pass
