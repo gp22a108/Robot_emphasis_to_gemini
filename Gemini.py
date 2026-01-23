@@ -31,6 +31,7 @@ import traceback
 import argparse
 import io
 import requests
+import threading
 
 # 設定ファイル
 import config
@@ -99,12 +100,15 @@ class AudioLoop:
         ### 【重要】カメラ撮影の制御コマンド
         ユーザーから写真撮影やカメラの起動を依頼された場合（例：「写真撮って」「撮影して」「カメラ起動」など）は、以下の手順を**必ず**守ってください。
 
-        1. 撮影の合図となるような、明るい返答をする（例：「いいよ、撮るね！」「はい、チーズ！」「撮るよ～」など）。
-        2. 応答の最初に、必ず `[CAPTURE_IMAGE]` という文字列を含める。
-           ※この文字列はシステムがカメラを起動するためのトリガーです。絶対に省略や変更をしないでください。
+        1. 応答の最初に、必ず `[CAPTURE_IMAGE]` という文字列を含める。
+        2. 次に、撮影の合図となるような掛け声を言う（例：「いいよ、撮るね！」「はい、チーズ！」「撮るよ～」など）。
+        3. **重要**: 掛け声の直後に必ず「改行」を入れてください。システムは改行のタイミングで写真を撮影します。
+        4. 改行の後に、撮影後の感想やリアクション（例：「撮れた！」「最高！」など）を続けてください。
 
         ### 応答例
-        AI：「[CAPTURE_IMAGE] オッケー！いい顔してるね〜。はい、とるよー」
+        AI：「[CAPTURE_IMAGE] オッケー！いい顔してるね〜。はい、とるよー
+        （ここでシステムが撮影）
+        うわ、めっちゃいい写真撮れた！最高！」
         
         ### 言い方例
         1. 声かけ（エンカウント・導入）
@@ -402,12 +406,12 @@ class AudioLoop:
                 if last_seen < session_start_time:
                     continue
 
-                # 30秒以上人が検出されていない場合
-                if time.time() - last_seen > 30:
-                    print("[Gemini] No person seen for 30s. Resetting session.")
+                # 3秒以上人が検出されていない場合
+                if time.time() - last_seen > 3:
+                    print("[Gemini] No person seen for 3s. Resetting session.")
                     
                     # ログ記録: タイムアウト
-                    Logger.log_interaction_result("Timeout (No person seen for 30s)")
+                    Logger.log_interaction_result("Timeout (No person seen for 3s)")
                     
                     self.yolo_detector.last_detection_time = 0 # Ensure we can detect immediately
                     self.reset_trigger = True
@@ -423,39 +427,47 @@ class AudioLoop:
         try:
             while True:
                 player = None
-                capture_callback_triggered = asyncio.Event()
-                capture_task = None
                 playback_finished_event = asyncio.Event() # 再生完了イベント
                 should_resume_mic = True # マイク再開フラグ
                 end_talk_detected = False # End_Talk検出フラグ
+                capture_pending = False # [CAPTURE_IMAGE]検出済みだが未撮影フラグ
 
-                def capture_action():
-                    nonlocal capture_task
-                    if not capture_callback_triggered.is_set():
-                        print("--- 写真撮影タスクを非同期で開始します ---")
+                # 撮影実行用関数（非同期）
+                async def perform_capture():
+                    print("\n--- 写真撮影を実行します ---")
+                    try:
+                        # 写真撮影時は pose_data_pic に変更
+                        # await asyncio.to_thread(update_pose, "pic")
                         
-                        async def _do_capture():
-                            # 写真撮影時は pose_data_pic に変更
-                            # トリガー検出時に既に変更しているので、ここでは変更しない
-                            # await asyncio.to_thread(update_pose, "pic")
-                            
-                            from Capture import take_picture  # 遅延インポート
-                            frame_to_capture = self.yolo_detector.get_current_frame()
-                            await asyncio.to_thread(take_picture, frame_to_capture, 0)
-                            
-                            # ログ記録: 写真撮影
-                            Logger.log_interaction_result("Picture Taken")
+                        from Capture import take_picture  # 遅延インポート
+                        frame_to_capture = self.yolo_detector.get_current_frame()
+                        # 0秒待機で撮影
+                        await asyncio.to_thread(take_picture, frame_to_capture, 0)
+                        
+                        # ログ記録: 写真撮影
+                        Logger.log_interaction_result("Picture Taken")
+                        
+                        # 撮影後はデフォルトポーズに戻す
+                        await asyncio.to_thread(update_pose, "default")
+                    except Exception as e:
+                        print(f"Capture failed: {e}")
+                        traceback.print_exc()
 
-                            # Send prompt
-                            print("[Gemini] Sending post-capture praise prompt.")
-                            await self.session.send_client_content(
-                                turns=self._user_turn("System Prompt →撮影結果を褒めて"),
-                                turn_complete=True,
-                            )
+                # Voicevox用コールバック（同期）
+                def capture_callback():
+                    # Voicevoxスレッドから呼ばれることを想定
+                    if threading.current_thread() is threading.main_thread():
+                        # メインスレッドなら非同期タスクとして投げるだけ（待たない）
+                        asyncio.run_coroutine_threadsafe(perform_capture(), self.loop)
+                        return
 
-                        # メインループで実行するようにスケジュールし、Futureを保存
-                        capture_task = asyncio.run_coroutine_threadsafe(_do_capture(), self.loop)
-                        capture_callback_triggered.set()
+                    print("--- Voicevox callback: Waiting for capture... ---")
+                    future = asyncio.run_coroutine_threadsafe(perform_capture(), self.loop)
+                    try:
+                        future.result() # 完了までブロック
+                        print("--- Voicevox callback: Capture finished ---")
+                    except Exception as e:
+                        print(f"Capture callback failed: {e}")
 
                 # 再生状態を監視するタスク
                 async def monitor_playback(p):
@@ -618,23 +630,67 @@ class AudioLoop:
                                 await asyncio.to_thread(update_pose, "default")
 
                             if text:
-                                if "[CAPTURE_IMAGE]" in text:
-                                    print("\n!!! 撮影トリガーを検出しました (Stream) !!!")
-                                    await asyncio.to_thread(update_pose, "pic")
-                                    if config.USE_VOICEVOX and player:
-                                        player.on_last_chunk_start = capture_action
-
                                 full_response_text.append(text)
-                                clean_text = text.replace("[CAPTURE_IMAGE]", "").replace("[End_Talk]", "")
                                 
-                                if clean_text:
-                                    print(clean_text, end="", flush=True)
-
-                                if config.USE_VOICEVOX and player and clean_text:
-                                    player.add_text(clean_text)
+                                # Handle [CAPTURE_IMAGE]
+                                parts_to_process = []
+                                if "[CAPTURE_IMAGE]" in text:
+                                    raw_parts = text.split("[CAPTURE_IMAGE]")
+                                    for i, part in enumerate(raw_parts):
+                                        parts_to_process.append({"text": part, "action": None})
+                                        if i < len(raw_parts) - 1:
+                                            parts_to_process.append({"text": "", "action": "enable_capture"})
+                                else:
+                                    parts_to_process.append({"text": text, "action": None})
                                 
-                                if "[End_Talk]" in text:
-                                    end_talk_detected = True
+                                for item in parts_to_process:
+                                    sub_text = item["text"]
+                                    action = item["action"]
+                                    
+                                    if action == "enable_capture":
+                                        print("\n!!! 撮影トリガーを検出しました (Stream) - Waiting for newline !!!")
+                                        await asyncio.to_thread(update_pose, "pic")
+                                        capture_pending = True
+                                        continue
+                                    
+                                    clean_sub_text = sub_text.replace("[End_Talk]", "")
+                                    
+                                    if capture_pending:
+                                        if '\n' in clean_sub_text:
+                                            print(" [Debug] Capture triggered at newline")
+                                            pre, post = clean_sub_text.split('\n', 1)
+                                            
+                                            if pre:
+                                                print(pre, end="", flush=True)
+                                                if config.USE_VOICEVOX and player:
+                                                    player.add_text(pre)
+                                            
+                                            print('\n', end="", flush=True)
+                                            if config.USE_VOICEVOX and player:
+                                                player.add_text('\n')
+                                                player.add_event(capture_callback)
+                                            else:
+                                                await perform_capture()
+                                            
+                                            capture_pending = False
+                                            
+                                            if post:
+                                                print(post, end="", flush=True)
+                                                if config.USE_VOICEVOX and player:
+                                                    player.add_text(post)
+                                        else:
+                                            if clean_sub_text:
+                                                print(clean_sub_text, end="", flush=True)
+                                                if config.USE_VOICEVOX and player:
+                                                    player.add_text(clean_sub_text)
+                                    else:
+                                        if clean_sub_text:
+                                            print(clean_sub_text, end="", flush=True)
+                                            if config.USE_VOICEVOX and player:
+                                                player.add_text(clean_sub_text)
+                                    
+                                    if "[End_Talk]" in sub_text:
+                                        end_talk_detected = True
                             
                             if not config.USE_VOICEVOX and audio_out_stream and audio_data:
                                 await asyncio.to_thread(audio_out_stream.write, audio_data)
@@ -659,16 +715,12 @@ class AudioLoop:
                         # ログ記録: Geminiの応答
                         Logger.log_gemini_conversation("Gemini", final_text)
                         
-                        if "[CAPTURE_IMAGE]" in final_text:
+                        if capture_pending:
+                            print("\n!!! 撮影トリガーを検出しました (End of Turn - Fallback) !!!")
                             if config.USE_VOICEVOX and player:
-                                if not player.on_last_chunk_start:
-                                    print("\n!!! 撮影トリガーを検出しました (End of Turn - Fallback) !!!")
-                                    await asyncio.to_thread(update_pose, "pic")
-                                    player.on_last_chunk_start = capture_action
-                            elif not config.USE_VOICEVOX:
-                                print("\n!!! 撮影トリガーを検出しました (Native) !!!")
-                                await asyncio.to_thread(update_pose, "pic")
-                                capture_action()
+                                player.add_event(capture_callback)
+                            else:
+                                await perform_capture()
                         
                         final_text_for_display = final_text.replace("[CAPTURE_IMAGE]", "").replace("[End_Talk]", "").strip()
                         
@@ -679,12 +731,6 @@ class AudioLoop:
                             # 既に再生完了イベントで抜けてきた場合は wait_done は即座に終わるはずだが、念のため呼ぶ
                             await asyncio.to_thread(player.wait_done)
                             print("\n[Gemini] 音声再生が完了しました。")
-
-                        if capture_task:
-                            try:
-                                await asyncio.wrap_future(capture_task)
-                            except Exception as e:
-                                print(f"Capture task failed: {e}")
                         
                         # End_Talk の処理を再生完了後に移動
                         if end_talk_detected:

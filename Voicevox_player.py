@@ -6,7 +6,7 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, wait
 import traceback
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 import config  # 設定ファイルをインポート
 
 # --- 定数 ---
@@ -166,9 +166,9 @@ class VoicevoxStreamPlayer:
                     break
                 
                 try:
-                    index, pcm_data = item
+                    index, data = item
                     
-                    if not self._play_start_triggered and pcm_data:
+                    if not self._play_start_triggered and data and not callable(data):
                         self._play_start_triggered = True
                         if self.on_play_start:
                             # print("\n--- 再生開始、コールバックをトリガー ---")
@@ -181,9 +181,14 @@ class VoicevoxStreamPlayer:
                             self.on_last_chunk_start()
                             self._last_chunk_callback_triggered.set()
 
-                    if pcm_data:
+                    if callable(data):
+                        try:
+                            data()
+                        except Exception as e:
+                            print(f"\n[Voicevox Error] Callback error: {e}")
+                    elif data:
                         self._is_writing = True
-                        stream.write(pcm_data)
+                        stream.write(data)
                         self._is_writing = False
 
                     # 再生後チェック
@@ -211,7 +216,7 @@ class VoicevoxStreamPlayer:
     def _flush_results_buffer(self):
         """バッファ内の完了したチャンクを順番に再生キューへ移動する"""
         while self._next_index_to_play in self._results_buffer:
-            pcm_data = self._results_buffer.pop(self._next_index_to_play)
+            data = self._results_buffer.pop(self._next_index_to_play)
             # コンソール出力を抑制して高速化
             # total_chunks_str = f"{self._total_chunks_added}" if self._is_generation_finished else "?"
             # try:
@@ -219,7 +224,7 @@ class VoicevoxStreamPlayer:
             #     sys.stdout.flush()
             # except Exception:
             #     pass
-            self._audio_queue.put((self._next_index_to_play, pcm_data))
+            self._audio_queue.put((self._next_index_to_play, data))
             self._next_index_to_play += 1
 
     def _generation_worker(self):
@@ -228,12 +233,22 @@ class VoicevoxStreamPlayer:
         while True:
             try:
                 try:
-                    text_chunk = self._text_queue.get(timeout=0.05)
-                    if text_chunk is None:
+                    item = self._text_queue.get(timeout=0.05)
+                    if item is None:
                         self._is_generation_finished = True
                         self._total_chunks_added = self._next_index_to_generate
                         self._text_queue.task_done()
                         break 
+                    
+                    if callable(item):
+                        index = self._next_index_to_generate
+                        self._results_buffer[index] = item
+                        self._next_index_to_generate += 1
+                        self._text_queue.task_done()
+                        self._flush_results_buffer()
+                        continue
+
+                    text_chunk = item
                     
                     try:
                         index = self._next_index_to_generate
@@ -298,6 +313,20 @@ class VoicevoxStreamPlayer:
                 self._text_queue.put(part.strip())
         
         self._text_buffer = parts[-1]
+
+    def add_event(self, callback: Callable[[], None]):
+        """再生キューにイベント（コールバック）を追加する"""
+        if not self.is_connected: return
+        if self._is_generation_finished:
+            print("Warning: Player is already finished. Cannot add event.")
+            return
+        
+        # テキストバッファが残っていればフラッシュする
+        if self._text_buffer.strip():
+            self._text_queue.put(self._text_buffer.strip())
+            self._text_buffer = ""
+            
+        self._text_queue.put(callback)
 
     def finish(self):
         """テキストの追加が完了したことを通知する"""
