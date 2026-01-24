@@ -221,6 +221,7 @@ class AudioLoop:
         self.reset_trigger = False
         self.detection_triggered = False
         self.session_active = asyncio.Event() # セッションがアクティブかどうかを管理するイベント
+        self.session_ready = asyncio.Event() # セッション準備完了を通知するイベント
         self.playback_active = asyncio.Event()
         self._playback_count = 0
 
@@ -289,25 +290,30 @@ class AudioLoop:
         # 既にセッションがアクティブなら何もしない
         if self.session_active.is_set():
             return
-            
+
         print("[Gemini] Person detected! Starting session AND playing First_play.wav...")
         self.detection_triggered = True
-        
+        self.session_ready.clear() # セッション準備完了フラグをリセット
+
         # ログ記録: Geminiへの通知
         Logger.log_gemini_conversation("システム", "検知 (First_play.wav 再生)")
-        
+
         # 1. Start Session Connection immediately (Trigger main loop)
         print("[Gemini] Triggering session start...")
-        self.session_active.set() 
-        
+        self.session_active.set()
+
         # 2. Play audio concurrently (Blocking in thread)
         self._mark_playback_start()
         try:
             await asyncio.to_thread(self._play_first_wav)
         finally:
             self._mark_playback_end()
-        
-        print("[Gemini] Audio finished. Unmuting microphone.")
+
+        # 3. Wait for session to be ready
+        print("[Gemini] Audio finished. Waiting for session to be ready...")
+        await self.session_ready.wait()
+
+        print("[Gemini] Session ready. Unmuting microphone.")
         self.mic_is_active.set()
 
     def _handle_yolo_detection(self):
@@ -871,6 +877,10 @@ class AudioLoop:
                 ):
                     self.session = session
                     self.out_queue = asyncio.Queue(maxsize=5)
+
+                    # セッション接続完了を通知
+                    self.session_ready.set()
+                    print("[Gemini] Session connected and ready.")
 
                     send_text_task = tg.create_task(self.send_text())
                     tg.create_task(self.send_realtime())
