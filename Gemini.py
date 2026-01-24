@@ -220,6 +220,8 @@ class AudioLoop:
         self.reset_trigger = False
         self.detection_triggered = False
         self.session_active = asyncio.Event() # セッションがアクティブかどうかを管理するイベント
+        self.playback_active = asyncio.Event()
+        self._playback_count = 0
 
     @staticmethod
     def _user_turn(text: str):
@@ -228,6 +230,17 @@ class AudioLoop:
             role="user",
             parts=[types.Part(text=text)],
         )
+
+    def _mark_playback_start(self):
+        self._playback_count += 1
+        if self._playback_count == 1:
+            self.playback_active.set()
+
+    def _mark_playback_end(self):
+        if self._playback_count > 0:
+            self._playback_count -= 1
+        if self._playback_count == 0:
+            self.playback_active.clear()
 
     def _play_first_wav(self):
         import wave
@@ -286,7 +299,11 @@ class AudioLoop:
         self.session_active.set() 
         
         # 2. Play audio concurrently (Blocking in thread)
-        await asyncio.to_thread(self._play_first_wav)
+        self._mark_playback_start()
+        try:
+            await asyncio.to_thread(self._play_first_wav)
+        finally:
+            self._mark_playback_end()
         
         print("[Gemini] Audio finished. Unmuting microphone.")
         self.mic_is_active.set()
@@ -298,6 +315,11 @@ class AudioLoop:
                 self._on_detected(),
                 self.loop,
             )
+
+    def _reset_detection_state(self):
+        """Allow a new detection to trigger the next session."""
+        if self.yolo_detector:
+            self.yolo_detector.reset_notification_flag()
 
     async def send_text(self):
         """標準入力からテキストを Live API に送信"""
@@ -393,6 +415,7 @@ class AudioLoop:
         """60秒間人が検出されなかったらリセットする監視タスク"""
         print("[Gemini] Timeout monitor started.")
         session_start_time = time.time()
+        timeout_seconds = getattr(config, "SESSION_TIMEOUT_SECONDS", 30)
         while True:
             await asyncio.sleep(1.0)
             if self.yolo_detector:
@@ -403,11 +426,22 @@ class AudioLoop:
                     continue
 
                 # 30秒以上人が検出されていない場合
-                if time.time() - last_seen > 30:
-                    print("[Gemini] No person seen for 30s. Resetting session.")
+                if time.time() - last_seen > timeout_seconds:
+                    if self.playback_active.is_set():
+                        print("[Gemini] Timeout reached but playback active. Waiting for playback to finish...")
+                        while self.playback_active.is_set():
+                            await asyncio.sleep(0.2)
+                        last_seen = self.yolo_detector.last_person_seen_time
+                        if last_seen < session_start_time:
+                            continue
+                        if time.time() - last_seen <= timeout_seconds:
+                            continue
+                    print(f"[Gemini] No person seen for {timeout_seconds}s. Resetting session.")
                     
                     # ログ記録: タイムアウト
-                    Logger.log_interaction_result("Timeout (No person seen for 30s)")
+                    Logger.log_interaction_result(
+                        f"Timeout (No person seen for {timeout_seconds}s)"
+                    )
                     
                     self.yolo_detector.last_detection_time = 0 # Ensure we can detect immediately
                     self.reset_trigger = True
@@ -419,6 +453,12 @@ class AudioLoop:
 
         audio_out_stream = None
         next_packet_task = None # タスク管理用変数を初期化
+        wait_playback_task = None
+
+        try:
+            from websockets.exceptions import ConnectionClosedOK
+        except Exception:
+            ConnectionClosedOK = None
 
         try:
             while True:
@@ -459,13 +499,25 @@ class AudioLoop:
 
                 # 再生状態を監視するタスク
                 async def monitor_playback(p):
-                    while True:
-                        if p.has_started_playing and not p.is_active:
-                            # 再生が開始され、かつアクティブでなくなったら完了とみなす
-                            playback_finished_event.set()
-                            break
-                        # 3FPS程度で監視 (0.33秒間隔)
-                        await asyncio.sleep(0.33)
+                    playback_marked = False
+                    playback_ended = False
+                    try:
+                        while True:
+                            if p.has_started_playing and not playback_marked:
+                                self._mark_playback_start()
+                                playback_marked = True
+                            if p.has_started_playing and not p.is_active:
+                                # 再生が開始され、かつアクティブでなくなったら完了とみなす
+                                if playback_marked:
+                                    self._mark_playback_end()
+                                    playback_ended = True
+                                playback_finished_event.set()
+                                break
+                            # 3FPS程度で監視 (0.33秒間隔)
+                            await asyncio.sleep(0.33)
+                    finally:
+                        if playback_marked and not playback_ended:
+                            self._mark_playback_end()
 
                 monitor_task = None
 
@@ -503,6 +555,7 @@ class AudioLoop:
                             except asyncio.CancelledError:
                                 pass
                             next_packet_task = None # キャンセル済みとしてマーク
+                            wait_playback_task = None
                             break # ループを抜ける
 
                         # パケット受信が完了した場合
@@ -510,11 +563,20 @@ class AudioLoop:
                             # 待機タスクはキャンセル（次のループで再作成されるため）
                             wait_playback_task.cancel()
                             try:
+                                await wait_playback_task
+                            except asyncio.CancelledError:
+                                pass
+                            wait_playback_task = None
+                            try:
                                 response = next_packet_task.result()
                             except StopAsyncIteration:
                                 next_packet_task = None
                                 break # ストリーム終了
                             except Exception as e:
+                                if ConnectionClosedOK and isinstance(e, ConnectionClosedOK):
+                                    self.reset_trigger = True
+                                    next_packet_task = None
+                                    raise SessionResetException() from e
                                 print(f"Error receiving packet: {e}")
                                 next_packet_task = None
                                 break
@@ -688,22 +750,34 @@ class AudioLoop:
                         
                         # End_Talk の処理を再生完了後に移動
                         if end_talk_detected:
-                            print("\n[Gemini] End of conversation detected. Enforcing 15s cooldown.")
+                            cooldown_seconds = max(
+                                0.0,
+                                float(getattr(config, "END_TALK_COOLDOWN_SECONDS", 15)),
+                            )
+                            print(
+                                f"\n[Gemini] End of conversation detected. Enforcing {cooldown_seconds:g}s cooldown."
+                            )
                             
                             # ログ記録: 会話終了
                             Logger.log_interaction_result("Conversation Ended (End_Talk)")
 
                             should_resume_mic = False # マイク再開を抑制
                             if self.yolo_detector:
-                                # 15秒間検出をブロックするように last_detection_time を設定
-                                # 確実に15秒後に反応できるように、計算上は少し短め(12秒)に設定する
-                                self.yolo_detector.last_detection_time = time.time() - config.DETECTION_INTERVAL + 12
+                                self.yolo_detector.last_detection_time = (
+                                    time.time()
+                                    + cooldown_seconds
+                                    - config.DETECTION_INTERVAL
+                                )
                             
                             raise SessionResetException()
 
                 finally:
                     if monitor_task:
                         monitor_task.cancel()
+                        try:
+                            await monitor_task
+                        except asyncio.CancelledError:
+                            pass
                     
                     if self.reset_trigger:
                         should_resume_mic = False
@@ -725,6 +799,13 @@ class AudioLoop:
                         player.close()
         finally:
             # 終了時に保留中のタスクがあればキャンセルして例外を回収する
+            if wait_playback_task and not wait_playback_task.done():
+                wait_playback_task.cancel()
+            if wait_playback_task:
+                try:
+                    await wait_playback_task
+                except Exception:
+                    pass
             if next_packet_task and not next_packet_task.done():
                 next_packet_task.cancel()
             
@@ -850,6 +931,7 @@ class AudioLoop:
                 # セッション開始待機
                 print("[Gemini] Waiting for person detection to start session...")
                 self.session_active.clear()
+                self._reset_detection_state()
                 await self.session_active.wait()
                 
                 try:
