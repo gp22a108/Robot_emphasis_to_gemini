@@ -2,6 +2,7 @@ import customtkinter as ctk
 from PIL import Image
 import os
 import datetime
+import Logger
 
 # --- 設定 ---
 ctk.set_appearance_mode("Light")
@@ -77,6 +78,7 @@ class ModernImageGridApp(ctk.CTk):
             top.protocol("WM_DELETE_WINDOW", top.destroy)
 
         except Exception as e:
+            Logger.log_system_error("画像表示", e, message=f"file={file_path}")
             print(f"Error opening large image: {e}")
 
     def monitor_folder(self):
@@ -169,6 +171,7 @@ class ModernImageGridApp(ctk.CTk):
                 self.card_frames.append(card)
 
             except Exception as e:
+                Logger.log_system_error("画像読み込み", e, message=f"file={filename}")
                 print(f"Error loading {filename}: {e}")
 
         # ★修正ポイント1: 画像配置後、少し待ってからグリッド計算を行う

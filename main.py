@@ -2,6 +2,7 @@ import subprocess
 import sys
 import os
 import time
+import Logger
 
 if __name__ == "__main__":
     total_start_time = time.perf_counter()
@@ -24,6 +25,7 @@ if __name__ == "__main__":
             print(f"{script_name} is running in the background. (Startup time: {elapsed:.3f}s)")
         except Exception as e:
             elapsed = time.perf_counter() - start_time
+            Logger.log_system_error("プロセス起動", e, message=f"script={script_name}")
             print(f"Failed to start {script_name}: {e} (Attempted for: {elapsed:.3f}s)")
 
     # 各プロセスを起動

@@ -165,7 +165,9 @@ class YOLOOptimizer:
 
         # --- メインモデルの読み込み ---
         if not os.path.exists(self.model_path):
-            print(f"\n[エラー] モデルファイルが見つかりません: {os.path.abspath(self.model_path)}")
+            message = f"モデルファイルが見つかりません: {os.path.abspath(self.model_path)}"
+            Logger.log_system_error("YOLO モデル読み込み", message=message)
+            print(f"\n[エラー] {message}")
             raise FileNotFoundError(f"Model not found at {self.model_path}")
 
         print(f"[YOLO] モデルを読み込んでいます: {self.model_path}")
@@ -288,7 +290,8 @@ class YOLOOptimizer:
                     pass
             self.result_queue.put((original_frame, results, process_time_ms))
 
-        except Exception:
+        except Exception as e:
+            Logger.log_system_error("YOLO 推論コールバック", e)
             print("Error in callback:")
             traceback.print_exc()
 
@@ -347,7 +350,8 @@ class YOLOOptimizer:
                     pass
             self.face_result_queue.put(results)
 
-        except Exception:
+        except Exception as e:
+            Logger.log_system_error("YOLO 顔推論コールバック", e)
             print("Error in face callback:")
             traceback.print_exc()
 
@@ -571,7 +575,7 @@ class YOLOOptimizer:
                         # 修正: 先に人数を数える
                         current_person_count = sum(1 for r in results if config.CLASSES.get(r['class_id']) == 'person')
 
-                        Logger.log_yolo_event(f"Person detected (Height: {h}px)", person_count=current_person_count)
+                        Logger.log_yolo_event(f"人物検出 (高さ: {h}px)", person_count=current_person_count)
 
                         should_update_time = True
                         if self.on_detection:
@@ -740,6 +744,7 @@ class YOLOOptimizer:
                     time.sleep(target_frame_time - elapsed_time)
 
         except Exception as e:
+            Logger.log_system_error("YOLO 実行", e)
             print(f"[YOLO Error] {e}")
             traceback.print_exc()
         finally:

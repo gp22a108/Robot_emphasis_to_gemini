@@ -5,6 +5,7 @@ import threading
 import time
 import json # jsonモジュールをインポート
 from socketserver import ThreadingMixIn
+import Logger
 import config # 設定ファイルをインポート
 
 # --- グローバル変数 ---
@@ -85,7 +86,8 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                     time.sleep(0.1)
 
             except Exception as e:
-                print(f"SSE loop error: {e}")
+                Logger.log_system_error("HTTP SSEループ", e)
+                print(f"SSEループエラー: {e}")
             finally:
                 return
         else:
@@ -148,7 +150,8 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                 except (ConnectionAbortedError, BrokenPipeError):
                     pass
             except Exception as e:
-                print(f"POST error: {e}")
+                Logger.log_system_error("HTTP POST /pose", e)
+                print(f"POSTエラー: {e}")
                 try:
                     self.send_response(500)
                     self.send_header('Content-type', 'application/json')

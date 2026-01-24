@@ -1,6 +1,7 @@
 import time
 import os
 import threading
+import Logger
 
 # 音声再生用のグローバル変数
 _shutter_sound = None
@@ -29,6 +30,7 @@ def _init_sound():
             # pygameがインストールされていない場合は何もしない（take_picture内でフォールバック）
             pass
         except Exception as e:
+            Logger.log_system_error("シャッター音初期化", e)
             print(f"Warning: Failed to init pygame sound: {e}")
     
     _sound_initialized = True
@@ -48,6 +50,7 @@ def take_picture(frame, delay_seconds=0):
     import cv2
 
     if frame is None:
+        Logger.log_system_error("撮影", message="フレームが提供されなかったため保存できませんでした")
         print("フレームが提供されなかったため、写真を撮影できませんでした。")
         return
 
@@ -88,10 +91,14 @@ def take_picture(frame, delay_seconds=0):
                 except ImportError:
                     print("Tip: Install 'pygame' for faster audio: pip install pygame")
                 except Exception as e:
+                    Logger.log_system_error("シャッター音再生", e)
                     print(f"Warning: Failed to play sound: {e}")
             
             threading.Thread(target=play_fallback, daemon=True).start()
 
     # 絶対パスを指定して画像を保存
-    cv2.imwrite(filepath, frame)
+    if not cv2.imwrite(filepath, frame):
+        Logger.log_system_error("撮影保存", message=f"保存に失敗しました: {filepath}")
+        print(f"写真の保存に失敗しました: {filepath}")
+        return
     print(f"写真を{filepath}として保存しました。")

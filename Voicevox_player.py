@@ -6,6 +6,7 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, wait
 import traceback
+import Logger
 from typing import Callable, Optional
 import config  # 設定ファイルをインポート
 
@@ -44,6 +45,7 @@ def generate_audio_chunk(session: requests.Session, text: str, speaker: int, ind
         return (index, synth_res.content)
 
     except Exception as e:
+        Logger.log_system_error("Voicevox 音声生成", e, message=f"text={text[:30]}")
         print(f"\n[Error] 生成エラー ({text[:10]}...): {e}")
         return (index, b"")
 
@@ -103,6 +105,7 @@ class VoicevoxStreamPlayer:
         # 再生スレッドが正常に開始したか確認
         if not self._playback_ready.is_set() or not self._player_thread.is_alive():
             self.close()
+            Logger.log_system_error("Voicevox 再生初期化", message="音声再生ストリームの初期化に失敗しました")
             print("[Voicevox Error] Failed to initialize audio playback stream.")
             return
         
@@ -136,7 +139,8 @@ class VoicevoxStreamPlayer:
             response = self._session.get(f"{BASE_URL}/version", timeout=0.5)
             response.raise_for_status()
             return True
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
+            Logger.log_system_error("Voicevox 接続確認", e, message=f"url={BASE_URL}")
             print(f"\n[Voicevox Error] Voicevoxエンジンに接続できません。URL: {BASE_URL}")
             return False
 
@@ -194,12 +198,14 @@ class VoicevoxStreamPlayer:
                             self._last_chunk_callback_triggered.set()
 
                 except Exception as e:
+                    Logger.log_system_error("Voicevox 再生", e)
                     print(f"\n[Voicevox Error] 再生中のエラー: {e}")
                     self._is_writing = False
                 finally:
                     self._audio_queue.task_done()
 
         except Exception as e:
+            Logger.log_system_error("Voicevox 再生スレッド", e)
             print(f"\n[Voicevox Error] 再生エラー: {e}")
             if not self._playback_ready.is_set():
                  self._playback_ready.set()
@@ -256,12 +262,14 @@ class VoicevoxStreamPlayer:
                             else:
                                 self._results_buffer[index] = None
                         except Exception as e:
+                            Logger.log_system_error("Voicevox 生成結果", e, message=f"index={index}")
                             print(f"[Error] Future result error (index {index}): {e}")
                             self._results_buffer[index] = None
                     
                     self._flush_results_buffer()
 
             except Exception as e:
+                Logger.log_system_error("Voicevox 生成ワーカー", e)
                 print(f"[Fatal Error] Generation worker crashed: {e}")
                 traceback.print_exc()
                 break
@@ -351,6 +359,7 @@ def play_text(text: str, speaker: int = 1, on_last_chunk_start: Optional[Callabl
             player.wait_done()
             player.close()
     except Exception as e:
+        Logger.log_system_error("Voicevox play_text", e)
         print(f"An unexpected error occurred in play_text: {e}")
         if player:
             player.close()
@@ -401,6 +410,7 @@ def main():
     except KeyboardInterrupt:
         print("\n再生を中断しました。")
     except Exception as e:
+        Logger.log_system_error("Voicevox main", e)
         print(f"Error: {e}")
 
 
