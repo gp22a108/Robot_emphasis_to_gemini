@@ -642,14 +642,14 @@ class AudioLoop:
                         go_away = self._get_field(response, "go_away")
                         if go_away:
                             time_left = self._get_field(go_away, "time_left")
-                            self._set_resume_request("go_away", time_left)
                             if time_left is None:
-                                print("[Gemini] GoAway received. Reconnecting for session resumption.")
-                                Logger.log_interaction_result("GoAway received (time_left=unknown)")
+                                print("[Gemini] GoAway received. Closing session completely.")
+                                Logger.log_interaction_result("GoAway received - Session terminated")
                             else:
-                                print(f"[Gemini] GoAway received (time_left={time_left}). Reconnecting for session resumption.")
-                                Logger.log_interaction_result(f"GoAway received (time_left={time_left})")
-                            raise SessionResumeException()
+                                print(f"[Gemini] GoAway received (time_left={time_left}). Closing session completely.")
+                                Logger.log_interaction_result(f"GoAway received (time_left={time_left}) - Session terminated")
+                            self.reset_trigger = True
+                            raise SessionResetException()
 
                         # --- 以下、既存のレスポンス処理ロジック ---
                         text = None
