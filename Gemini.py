@@ -222,6 +222,7 @@ class AudioLoop:
         self.detection_triggered = False
         self.session_active = asyncio.Event() # セッションがアクティブかどうかを管理するイベント
         self.session_ready = asyncio.Event() # セッション準備完了を通知するイベント
+        self.session_failed = asyncio.Event() # Session start failure event
         self.playback_active = asyncio.Event()
         self._playback_count = 0
 
@@ -294,6 +295,7 @@ class AudioLoop:
         print("[Gemini] Person detected! Starting session AND playing First_play.wav...")
         self.detection_triggered = True
         self.session_ready.clear() # セッション準備完了フラグをリセット
+        self.session_failed.clear() # セッション開始失敗フラグをリセット
 
         # ログ記録: Geminiへの通知
         Logger.log_gemini_conversation("システム", "検知 (First_play.wav 再生)")
@@ -311,7 +313,27 @@ class AudioLoop:
 
         # 3. Wait for session to be ready
         print("[Gemini] Audio finished. Waiting for session to be ready...")
-        await self.session_ready.wait()
+        connect_timeout = float(getattr(config, "SESSION_CONNECT_TIMEOUT_SECONDS", 30))
+        ready_task = asyncio.create_task(self.session_ready.wait())
+        failed_task = asyncio.create_task(self.session_failed.wait())
+        done, pending = await asyncio.wait(
+            [ready_task, failed_task],
+            timeout=connect_timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if not done:
+            print("[Gemini] Session ready wait timed out. Keeping mic muted.")
+            return
+        if self.session_failed.is_set() or not self.session_active.is_set():
+            print("[Gemini] Session failed to start. Keeping mic muted.")
+            return
 
         print("[Gemini] Session ready. Unmuting microphone.")
         self.mic_is_active.set()
@@ -900,6 +922,29 @@ class AudioLoop:
                     return any(is_reset_exception(ex) for ex in e.exceptions)
                 return False
 
+            def is_transient_connect_error(e):
+                if isinstance(e, ExceptionGroup):
+                    return any(is_transient_connect_error(ex) for ex in e.exceptions)
+                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ConnectionError)):
+                    return True
+                error_name = type(e).__name__
+                if error_name in {
+                    "InvalidHandshake",
+                    "InvalidStatus",
+                    "InvalidStatusCode",
+                    "WebSocketException",
+                }:
+                    return True
+                error_str = str(e).lower()
+                return (
+                    "timed out" in error_str
+                    or "timeout" in error_str
+                    or "handshake" in error_str
+                    or "connection reset" in error_str
+                    or "connection refused" in error_str
+                    or "getaddrinfo" in error_str
+                )
+
             while True:
                 # セッション開始待機
                 print("[Gemini] Waiting for person detection to start session...")
@@ -949,6 +994,24 @@ class AudioLoop:
                         self.detection_triggered = False
                         self.mic_is_active.clear()
                         await asyncio.sleep(1)
+                        continue
+
+                    if is_transient_connect_error(e):
+                        retry_delay = float(getattr(config, "CONNECT_RETRY_WAIT_SECONDS", 5))
+                        self.session_failed.set()
+                        self.session_active.clear()
+                        self.detection_triggered = False
+                        self.mic_is_active.clear()
+                        if self.audio_stream:
+                            self.audio_stream.close()
+                            self.audio_stream = None
+                        Logger.log_system_error(
+                            "Gemini connection retry",
+                            e,
+                            message=f"retry_delay={retry_delay:.1f}s",
+                        )
+                        print(f"[Gemini] Connection error. Retrying after {retry_delay:.1f}s...")
+                        await asyncio.sleep(retry_delay)
                         continue
                     
                     if isinstance(e, asyncio.CancelledError):
