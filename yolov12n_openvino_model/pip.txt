@@ -1,0 +1,14 @@
+pip install google-genai
+pip install opencv-python
+pip install pillow
+pip install mss
+pip install aiohttp
+pip install psutil
+pip install requests
+pip install openvino
+pip install ultralytics
+pip install numpy
+pip install sounddevice
+pip install customtkinter
+pip install playsound3
+pip install websockets tkinter

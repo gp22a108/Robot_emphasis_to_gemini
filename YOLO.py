@@ -665,10 +665,12 @@ class YOLOOptimizer:
 
         return frame
 
-    def run(self, source=0):
+    def run(self, source=None):
         try:
             self._initialize_dependencies()
-            
+            if source is None:
+                source = config.VIDEO_SOURCE
+
             cap = cv2.VideoCapture(source)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
