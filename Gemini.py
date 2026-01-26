@@ -67,7 +67,7 @@ def update_pose(mode):
         # 127.0.0.1 を使用して接続を試みる
         url = f"http://127.0.0.1:{config.HTTP_SERVER_PORT}/pose"
         data = {"mode": mode}
-        requests.post(url, json=data, timeout=2.0)
+        requests.post(url, json=data, timeout=2.0, proxies={"http": None, "https": None})
     except Exception as e:
         Logger.log_system_error("姿勢更新", e, message=f"mode={mode}")
         print(f"[Gemini] 姿勢更新に失敗しました (mode={mode}): {e}")

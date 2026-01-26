@@ -433,7 +433,7 @@ class YOLOOptimizer:
                     # Fallback for legacy or simple int
                     json_data["CSotaMotion.SV_BODY_Y"] = int(command_data)
                 
-                requests.post(url, json=json_data, timeout=0.1)
+                requests.post(url, json=json_data, timeout=0.1, proxies={"http": None, "https": None})
             except queue.Empty:
                 continue
             except Exception:

@@ -77,6 +77,7 @@ class VoicevoxStreamPlayer:
         self._text_buffer = ""  # ストリーミング用テキストバッファ
 
         self._session = requests.Session()
+        self._session.trust_env = False
         self._executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
         self._audio_queue = queue.Queue()
         self._text_queue = queue.Queue()
