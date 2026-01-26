@@ -20,6 +20,10 @@ NMS_THRESHOLD = 0.5
 # --- 映像入力設定 ---
 # 0: デフォルトカメラ, 1: 別カメラ番号, "path/to/video.mp4": 動画ファイル, "rtsp://...": ストリーム
 VIDEO_SOURCE = 0
+# カメラ入力の希望設定 (16:9)
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
+CAMERA_FPS = 30.0
 # 同じ物体を再検出するまでの待機時間 (秒)
 # Gemini側でセッション管理しているため、YOLO側での制限はほぼなくす
 DETECTION_INTERVAL = 1.0

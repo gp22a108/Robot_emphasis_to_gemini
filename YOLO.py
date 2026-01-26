@@ -672,8 +672,9 @@ class YOLOOptimizer:
                 source = config.VIDEO_SOURCE
 
             cap = cv2.VideoCapture(source)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+            cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
 
             if not cap.isOpened():
                 print("[エラー] カメラを開けませんでした。")
