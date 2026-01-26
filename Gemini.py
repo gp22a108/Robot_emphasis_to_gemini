@@ -47,6 +47,10 @@ mss = None
 class SessionResetException(Exception):
     pass
 
+
+class SessionResumeException(Exception):
+    pass
+
 # 定数定義
 FORMAT = 8 # pyaudio.paInt16 (値は8)
 CHANNELS = 1
@@ -225,6 +229,39 @@ class AudioLoop:
         self.session_failed = asyncio.Event() # Session start failure event
         self.playback_active = asyncio.Event()
         self._playback_count = 0
+        self.session_resumption_handle = None
+        self.resume_trigger = False
+        self.resume_reason = None
+        self.resume_time_left = None
+
+    @staticmethod
+    def _get_field(obj, name):
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    def _set_resume_request(self, reason, time_left=None):
+        self.resume_trigger = True
+        self.resume_reason = reason
+        self.resume_time_left = time_left
+
+    def _clear_session_resumption(self):
+        self.session_resumption_handle = None
+        self.resume_trigger = False
+        self.resume_reason = None
+        self.resume_time_left = None
+
+    def _build_session_resumption_config(self):
+        if not getattr(config, "SESSION_RESUMPTION_ENABLED", True):
+            return None
+        session_resumption = {
+            "transparent": bool(getattr(config, "SESSION_RESUMPTION_TRANSPARENT", True)),
+        }
+        if self.session_resumption_handle:
+            session_resumption["handle"] = self.session_resumption_handle
+        return session_resumption
 
     @staticmethod
     def _user_turn(text: str):
@@ -431,15 +468,27 @@ class AudioLoop:
         else:
             kwargs = {}
 
-        while True:
-            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-            if self.mic_is_active.is_set():
-                await self.out_queue.put(
-                    (
-                        "audio",
-                        types.Blob(data=data, mime_type="audio/pcm;rate=16000"),
+        try:
+            while True:
+                data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+                if self.mic_is_active.is_set():
+                    await self.out_queue.put(
+                        (
+                            "audio",
+                            types.Blob(data=data, mime_type="audio/pcm;rate=16000"),
+                        )
                     )
-                )
+        finally:
+            if self.audio_stream:
+                try:
+                    self.audio_stream.stop_stream()
+                except Exception:
+                    pass
+                try:
+                    self.audio_stream.close()
+                except Exception:
+                    pass
+                self.audio_stream = None
 
     async def monitor_timeout(self):
         """60秒間人が検出されなかったらリセットする監視タスク"""
@@ -579,6 +628,28 @@ class AudioLoop:
                             break
                         
                         next_packet_task = None # 処理完了
+
+                        resumption_update = self._get_field(response, "session_resumption_update")
+                        if resumption_update:
+                            new_handle = self._get_field(resumption_update, "new_handle")
+                            resumable = self._get_field(resumption_update, "resumable")
+                            if new_handle and new_handle != self.session_resumption_handle:
+                                self.session_resumption_handle = new_handle
+                                print("[Gemini] Session resumption handle updated.")
+                            elif resumable is False:
+                                print("[Gemini] Session resumption temporarily unavailable.")
+
+                        go_away = self._get_field(response, "go_away")
+                        if go_away:
+                            time_left = self._get_field(go_away, "time_left")
+                            self._set_resume_request("go_away", time_left)
+                            if time_left is None:
+                                print("[Gemini] GoAway received. Reconnecting for session resumption.")
+                                Logger.log_interaction_result("GoAway received (time_left=unknown)")
+                            else:
+                                print(f"[Gemini] GoAway received (time_left={time_left}). Reconnecting for session resumption.")
+                                Logger.log_interaction_result(f"GoAway received (time_left={time_left})")
+                            raise SessionResumeException()
 
                         # --- 以下、既存のレスポンス処理ロジック ---
                         text = None
@@ -777,6 +848,9 @@ class AudioLoop:
                         except asyncio.CancelledError:
                             pass
                     
+                    if self.resume_trigger:
+                        should_resume_mic = True
+
                     if self.reset_trigger:
                         should_resume_mic = False
 
@@ -890,8 +964,16 @@ class AudioLoop:
 
             print(f"[Gemini] Audio Output Mode: {'VOICEVOX' if config.USE_VOICEVOX else 'GEMINI NATIVE'}")
 
+            def with_session_resumption(live_config):
+                config_copy = live_config.copy()
+                session_resumption = self._build_session_resumption_config()
+                if session_resumption is not None:
+                    config_copy["session_resumption"] = session_resumption
+                return config_copy
+
             async def start_session(live_config):
                 self.reset_trigger = False
+                self.resume_trigger = False
                 self.detection_triggered = False
                 async with (
                     client.aio.live.connect(model=MODEL, config=live_config) as session,
@@ -922,6 +1004,13 @@ class AudioLoop:
                     return any(is_reset_exception(ex) for ex in e.exceptions)
                 return False
 
+            def is_resume_exception(e):
+                if isinstance(e, SessionResumeException):
+                    return True
+                if isinstance(e, ExceptionGroup):
+                    return any(is_resume_exception(ex) for ex in e.exceptions)
+                return False
+
             def is_transient_connect_error(e):
                 if isinstance(e, ExceptionGroup):
                     return any(is_transient_connect_error(ex) for ex in e.exceptions)
@@ -932,6 +1021,9 @@ class AudioLoop:
                     "InvalidHandshake",
                     "InvalidStatus",
                     "InvalidStatusCode",
+                    "ConnectionClosed",
+                    "ConnectionClosedError",
+                    "ConnectionClosedOK",
                     "WebSocketException",
                 }:
                     return True
@@ -942,54 +1034,79 @@ class AudioLoop:
                     or "handshake" in error_str
                     or "connection reset" in error_str
                     or "connection refused" in error_str
+                    or "connection closed" in error_str
+                    or "keepalive ping timeout" in error_str
                     or "getaddrinfo" in error_str
                 )
 
+            resume_pending = False
+            resume_retry_delay = float(getattr(config, "SESSION_RESUMPTION_RETRY_WAIT_SECONDS", 0.5))
+
             while True:
-                # セッション開始待機
-                print("[Gemini] Waiting for person detection to start session...")
-                self.session_active.clear()
-                self._reset_detection_state()
-                await self.session_active.wait()
-                
+                # セッション開始待機 or 再開
+                if not resume_pending:
+                    print("[Gemini] Waiting for person detection to start session...")
+                    self.session_active.clear()
+                    self._reset_detection_state()
+                    await self.session_active.wait()
+                else:
+                    print("[Gemini] Resuming session with stored handle...")
+                resume_pending = False
+
                 try:
                     # 接続試行
                     if vad_config:
                         try:
                             print("[Gemini] Connecting with VAD settings...")
-                            await start_session(config_with_vad)
+                            await start_session(with_session_resumption(config_with_vad))
                         except Exception as e:
-                            if is_reset_exception(e):
-                                # セッションリセット時はループの先頭に戻り、再度検出待ちになる
-                                print("[Gemini] Session ended. Returning to detection wait state.")
-                                self.session_active.clear()
-                                self.detection_triggered = False
-                                self.mic_is_active.clear()
-                                continue
-                            
+                            if is_reset_exception(e) or is_resume_exception(e):
+                                raise
+
                             # ValidationError かどうかを判定 (型名やメッセージで)
                             error_str = str(e)
                             if "ValidationError" in str(type(e).__name__) or "Extra inputs are not permitted" in error_str:
-                                print(f"[Gemini] VAD settings not supported by this SDK version. Falling back to default.")
+                                print("[Gemini] VAD settings not supported by this SDK version. Falling back to default.")
                                 # print(f"  -> Error details: {error_str.splitlines()[0]}...") # 最初の一行だけ表示 (抑制)
-                                await start_session(config_no_vad)
+                                await start_session(with_session_resumption(config_no_vad))
                             else:
                                 raise e
                     else:
-                        await start_session(config_no_vad)
-                    
+                        await start_session(with_session_resumption(config_no_vad))
+
                     break # Normal exit
 
+                except SessionResumeException:
+                    print("[Gemini] Session resumption requested. Reconnecting...")
+                    self.resume_trigger = False
+                    self.resume_reason = None
+                    self.resume_time_left = None
+                    resume_pending = True
+                    if resume_retry_delay > 0:
+                        await asyncio.sleep(resume_retry_delay)
+                    continue
                 except SessionResetException:
                     print("[Gemini] Session ended. Returning to detection wait state.")
+                    self._clear_session_resumption()
                     self.session_active.clear()
                     self.detection_triggered = False
                     self.mic_is_active.clear()
                     await asyncio.sleep(1)
                     continue
                 except Exception as e:
+                    if is_resume_exception(e):
+                        print("[Gemini] Session resumption requested. Reconnecting...")
+                        self.resume_trigger = False
+                        self.resume_reason = None
+                        self.resume_time_left = None
+                        resume_pending = True
+                        if resume_retry_delay > 0:
+                            await asyncio.sleep(resume_retry_delay)
+                        continue
+
                     if is_reset_exception(e):
                         print("[Gemini] Session ended. Returning to detection wait state.")
+                        self._clear_session_resumption()
                         self.session_active.clear()
                         self.detection_triggered = False
                         self.mic_is_active.clear()
@@ -998,6 +1115,19 @@ class AudioLoop:
 
                     if is_transient_connect_error(e):
                         retry_delay = float(getattr(config, "CONNECT_RETRY_WAIT_SECONDS", 5))
+                        if self.session_active.is_set():
+                            if not self.session_resumption_handle:
+                                print("[Gemini] No resumption handle yet. Starting a new session.")
+                            Logger.log_system_error(
+                                "Gemini session resumption retry",
+                                e,
+                                message=f"retry_delay={resume_retry_delay:.1f}s",
+                            )
+                            resume_pending = True
+                            if resume_retry_delay > 0:
+                                await asyncio.sleep(resume_retry_delay)
+                            continue
+
                         self.session_failed.set()
                         self.session_active.clear()
                         self.detection_triggered = False
@@ -1013,10 +1143,10 @@ class AudioLoop:
                         print(f"[Gemini] Connection error. Retrying after {retry_delay:.1f}s...")
                         await asyncio.sleep(retry_delay)
                         continue
-                    
+
                     if isinstance(e, asyncio.CancelledError):
                         break
-                    
+
                     if self.audio_stream:
                         self.audio_stream.close()
                     Logger.log_system_error("Gemini セッション", e)

@@ -36,6 +36,10 @@ SESSION_TIMEOUT_SECONDS = 5
 SESSION_CONNECT_TIMEOUT_SECONDS = 30
 # Retry wait after connect error (seconds)
 CONNECT_RETRY_WAIT_SECONDS = 5
+# Session resumption settings
+SESSION_RESUMPTION_ENABLED = True
+SESSION_RESUMPTION_TRANSPARENT = True
+SESSION_RESUMPTION_RETRY_WAIT_SECONDS = 0.5
 # End_Talk 検出後のクールダウン時間 (秒)
 END_TALK_COOLDOWN_SECONDS = 5
 # ユーザー発話後、Geminiからの応答を待つ最大時間 (秒)
