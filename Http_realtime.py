@@ -5,6 +5,7 @@ import threading
 import time
 import json # jsonモジュールをインポート
 from socketserver import ThreadingMixIn
+from urllib.parse import urlparse
 import Logger
 import config # 設定ファイルをインポート
 
@@ -33,7 +34,8 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
     /pose へのPOSTリクエストで、ポーズデータを受け取り更新する。
     """
     def do_GET(self):
-        if self.path == "/pose":
+        path = urlparse(self.path).path
+        if path in ("/pose", "/pose/"):
             # SSE用のヘッダーを送信
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -98,7 +100,8 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global pose_data, yolo_control_values
-        if self.path == '/pose':
+        path = urlparse(self.path).path
+        if path in ("/pose", "/pose/"):
             try:
                 content_length = int(self.headers['Content-Length'])
                 post_body = self.rfile.read(content_length)
