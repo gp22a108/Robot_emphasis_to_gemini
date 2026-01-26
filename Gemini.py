@@ -349,7 +349,7 @@ class AudioLoop:
     def _reset_detection_state(self):
         """Allow a new detection to trigger the next session."""
         if self.yolo_detector:
-            self.yolo_detector.reset_notification_flag()
+            self.yolo_detector.reset_notification_flag(defer=True)
 
     async def send_text(self):
         """標準入力からテキストを Live API に送信"""

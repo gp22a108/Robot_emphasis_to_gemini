@@ -104,6 +104,8 @@ class YOLOOptimizer:
 
         # 通知済みフラグ
         self.has_notified_in_session = False
+        self.pending_notification_reset = False
+        self.last_large_person_time = 0.0
 
     def is_ready(self):
         """初期化が完了したかどうかを返す"""
@@ -119,9 +121,13 @@ class YOLOOptimizer:
             self.target_fps = 30.0
             print("[YOLO] Low FPS Mode: OFF (30 FPS)")
 
-    def reset_notification_flag(self):
+    def reset_notification_flag(self, defer: bool = False):
         """通知済みフラグをリセットする（セッション終了時などに呼ぶ）"""
+        if defer:
+            self.pending_notification_reset = True
+            return
         self.has_notified_in_session = False
+        self.pending_notification_reset = False
         print("[YOLO] Notification flag reset.")
 
     def _initialize_dependencies(self):
@@ -567,6 +573,7 @@ class YOLOOptimizer:
                         closest_person_cy = cy
 
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
+                self.last_large_person_time = current_time
                 # 通知済みフラグをチェック
                 if not self.has_notified_in_session:
                     if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
@@ -604,6 +611,12 @@ class YOLOOptimizer:
             # 人が映っていない場合、last_person_seen_timeを更新しない
             # これにより、Gemini側で「最後に人を見た時間」からの経過時間を計測できる
             pass
+
+        if self.pending_notification_reset:
+            reset_after = float(getattr(config, "SESSION_TIMEOUT_SECONDS", 30))
+            if self.last_large_person_time == 0.0 or (current_time - self.last_large_person_time) > reset_after:
+                self.has_notified_in_session = False
+                self.pending_notification_reset = False
 
         # ロボット追跡コマンドの送信
         if closest_person_cx is not None:
