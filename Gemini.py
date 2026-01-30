@@ -1237,6 +1237,26 @@ class AudioLoop:
                         if self.session_active.is_set():
                             if not self.session_resumption_handle:
                                 print("[Gemini] No resumption handle yet. Starting a new session.")
+
+                            # 連続失敗が多い場合は完全にリセット
+                            if self.consecutive_connection_failures >= 3:
+                                print(f"[Gemini] Too many consecutive failures ({self.consecutive_connection_failures}). Resetting session.")
+                                Logger.log_system_error(
+                                    "Gemini connection failure limit",
+                                    e,
+                                    message=f"consecutive_failures={self.consecutive_connection_failures}, forcing reset"
+                                )
+                                self.session_failed.set()
+                                self.session_active.clear()
+                                self.detection_triggered = False
+                                self.mic_is_active.clear()
+                                self._clear_session_resumption()
+                                if self.audio_stream:
+                                    self.audio_stream.close()
+                                    self.audio_stream = None
+                                await asyncio.sleep(1)
+                                continue
+
                             Logger.log_system_error(
                                 "Gemini session resumption retry",
                                 e,
