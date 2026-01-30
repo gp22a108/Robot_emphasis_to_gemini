@@ -551,9 +551,9 @@ class YOLOOptimizer:
                 if h > max_person_h:
                     max_person_h = h
                 
-                # セッション維持のための判定（厳しめ）
-                # 高さ 150px 以上、かつ 信頼度 0.60 以上
-                if h > 150 and confidence > 0.60:
+                # セッション維持のための判定
+                # 高さ 150px 以上、かつ 設定の信頼度しきい値以上
+                if h > 150 and confidence >= config.CONFIDENCE_THRESHOLD:
                     person_detected_for_session = True
 
                 # 通知用のロジック (既存)

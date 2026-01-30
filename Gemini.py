@@ -386,7 +386,7 @@ class AudioLoop:
     def _reset_detection_state(self):
         """Allow a new detection to trigger the next session."""
         if self.yolo_detector:
-            self.yolo_detector.reset_notification_flag(defer=True)
+            self.yolo_detector.reset_notification_flag(defer=False)
 
     async def send_text(self):
         """標準入力からテキストを Live API に送信"""
@@ -1115,13 +1115,29 @@ class AudioLoop:
 
                     if is_transient_connect_error(e):
                         retry_delay = float(getattr(config, "CONNECT_RETRY_WAIT_SECONDS", 5))
+                        Logger.log_system_event(
+                            "INFO",
+                            "Gemini reconnect decision",
+                            message=(
+                                "transient_error=1; "
+                                f"session_active={self.session_active.is_set()}; "
+                                f"resume_pending={resume_pending}; "
+                                f"has_resumption_handle={bool(self.session_resumption_handle)}; "
+                                f"error={type(e).__name__}: {e}"
+                            ),
+                        )
                         if self.session_active.is_set():
                             if not self.session_resumption_handle:
                                 print("[Gemini] No resumption handle yet. Starting a new session.")
                             Logger.log_system_error(
                                 "Gemini session resumption retry",
                                 e,
-                                message=f"retry_delay={resume_retry_delay:.1f}s",
+                                message=(
+                                    f"retry_delay={resume_retry_delay:.1f}s; "
+                                    f"session_active={self.session_active.is_set()}; "
+                                    f"resume_pending={resume_pending}; "
+                                    f"has_resumption_handle={bool(self.session_resumption_handle)}"
+                                ),
                             )
                             resume_pending = True
                             if resume_retry_delay > 0:
@@ -1138,7 +1154,12 @@ class AudioLoop:
                         Logger.log_system_error(
                             "Gemini connection retry",
                             e,
-                            message=f"retry_delay={retry_delay:.1f}s",
+                            message=(
+                                f"retry_delay={retry_delay:.1f}s; "
+                                f"session_active={self.session_active.is_set()}; "
+                                f"resume_pending={resume_pending}; "
+                                f"has_resumption_handle={bool(self.session_resumption_handle)}"
+                            ),
                         )
                         print(f"[Gemini] Connection error. Retrying after {retry_delay:.1f}s...")
                         await asyncio.sleep(retry_delay)

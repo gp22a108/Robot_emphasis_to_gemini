@@ -67,6 +67,11 @@ def log_interaction_result(result):
 
 def log_system_error(context, exc=None, message=None):
     """システムエラーをCSVに記録する。"""
+    log_system_event("ERROR", context, exc=exc, message=message)
+
+
+def log_system_event(level, context, message=None, exc=None):
+    """システムイベントをCSVに記録する。"""
     file_path = os.path.join(LOG_DIR, "system_error_log.csv")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     error_type = type(exc).__name__ if exc else ""
@@ -77,6 +82,6 @@ def log_system_error(context, exc=None, message=None):
     _append_csv(
         file_path,
         ["日時", "レベル", "コンテキスト", "例外種別", "メッセージ", "トレースバック"],
-        [timestamp, "ERROR", context or "不明", error_type, error_message, trace],
+        [timestamp, level, context or "不明", error_type, error_message, trace],
         "system_error_log.csv",
     )
