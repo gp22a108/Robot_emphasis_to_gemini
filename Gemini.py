@@ -391,7 +391,11 @@ class AudioLoop:
     async def send_text(self):
         """標準入力からテキストを Live API に送信"""
         while True:
-            text = await asyncio.to_thread(input, "message > ")
+            try:
+                text = await asyncio.to_thread(input, "message > ")
+            except UnicodeDecodeError as e:
+                print(f"[Gemini] Input decode error: {e}. Skipping...")
+                continue
             if text.lower() == "q":
                 break
             
