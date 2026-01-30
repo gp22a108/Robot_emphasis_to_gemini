@@ -272,28 +272,11 @@ class YOLOOptimizer:
                 return True
         return False
 
-    def _camera_candidates(self, source):
-        if not isinstance(source, int):
-            return [source]
-        max_index = int(getattr(config, "CAMERA_SCAN_MAX_INDEX", 0))
-        if max_index < source:
-            max_index = source
-        candidates = [source]
-        for idx in range(0, max_index + 1):
-            if idx == source:
-                continue
-            candidates.append(idx)
-        return candidates
-
     def _open_camera(self, source):
         cap = cv2.VideoCapture(source)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
-        try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
         if not cap.isOpened():
             try:
                 cap.release()
@@ -301,20 +284,6 @@ class YOLOOptimizer:
                 pass
             return None
         return cap
-
-    def _open_camera_with_candidates(self, source):
-        for candidate in self._camera_candidates(source):
-            cap = self._open_camera(candidate)
-            if cap:
-                if candidate != source:
-                    print(f"[YOLO] Camera source switched from {source} to {candidate}.")
-                    Logger.log_system_event(
-                        "INFO",
-                        "YOLO camera source switch",
-                        message=f"from={source}, to={candidate}",
-                    )
-                return cap, candidate
-        return None, source
 
     def _reconnect_camera(self, source):
         base_delay = float(getattr(config, "CAMERA_RECONNECT_BASE_DELAY_SECONDS", 0.5))
@@ -327,12 +296,12 @@ class YOLOOptimizer:
             print(f"[YOLO] Camera reconnect attempt {attempt}, waiting {delay:.1f}s...")
             Logger.log_system_event("INFO", "YOLO camera reconnect", message=f"attempt={attempt}, delay={delay:.1f}s")
             time.sleep(delay)
-            cap, new_source = self._open_camera_with_candidates(source)
+            cap = self._open_camera(source)
             if cap:
                 print("[YOLO] Camera reconnected.")
                 Logger.log_system_event("INFO", "YOLO camera reconnect", message="Reconnected successfully")
-                return cap, new_source
-        return None, source
+                return cap
+        return None
 
     def _completion_callback(self, request, userdata):
         try:
@@ -787,12 +756,12 @@ class YOLOOptimizer:
                 print("[YOLO] OpenCV window disabled (not running in main thread).")
                 Logger.log_system_event("INFO", "YOLO viewer", message="OpenCV window disabled (not in main thread)")
 
-            cap, source = self._open_camera_with_candidates(source)
+            cap = self._open_camera(source)
             if not cap:
                 if self._should_reconnect_source(source):
                     print("[YOLO] Camera open failed. Attempting to reconnect...")
                     Logger.log_system_event("INFO", "YOLO camera reconnect", message="Initial open failed, starting reconnect loop")
-                    cap, source = self._reconnect_camera(source)
+                    cap = self._reconnect_camera(source)
                 if not cap:
                     print("[エラー] カメラを開けませんでした。")
                     return
@@ -825,26 +794,9 @@ class YOLOOptimizer:
                         time.sleep(0.1)
                         continue
 
-                    read_timeout = None
-                    if self._should_reconnect_source(source):
-                        read_timeout = float(getattr(config, "CAMERA_READ_TIMEOUT_SECONDS", 2.0))
-                    read_start = time.time()
                     ret, frame = cap.read()
-                    read_elapsed = time.time() - read_start
-                    read_timeout_triggered = False
-                    if read_timeout and read_elapsed > read_timeout:
-                        read_timeout_triggered = True
-                        Logger.log_system_event(
-                            "INFO",
-                            "YOLO camera read timeout",
-                            message=f"elapsed={read_elapsed:.2f}s, threshold={read_timeout:.2f}s",
-                        )
-                        ret = False
-                    if ret and (frame is None or frame.size == 0):
-                        ret = False
                     if not ret:
-                        reason = "read_timeout" if read_timeout_triggered else "read_failed"
-                        message = f"映像ストリーム終了 ({reason}) at iteration {loop_iteration}"
+                        message = f"映像ストリーム終了 (カメラ切断またはエラー) at iteration {loop_iteration}"
                         print(f"[情報] {message}")
                         Logger.log_system_error("YOLO カメラストリーム", message=message)
                         if self._should_reconnect_source(source):
@@ -852,7 +804,7 @@ class YOLOOptimizer:
                                 cap.release()
                             except Exception:
                                 pass
-                            cap, source = self._reconnect_camera(source)
+                            cap = self._reconnect_camera(source)
                             if cap:
                                 continue
                         break
