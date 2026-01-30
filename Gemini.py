@@ -559,14 +559,17 @@ class AudioLoop:
                         if time.time() - last_seen <= timeout_seconds:
                             continue
                     print(f"[Gemini] No person seen for {timeout_seconds}s. Resetting session.")
-                    
+
                     # ログ記録: タイムアウト
                     Logger.log_interaction_result(
                         f"タイムアウト（{timeout_seconds}秒間人物未検出）"
                     )
-                    
+                    Logger.log_system_event("INFO", "Gemini timeout", message=f"Raising SessionResetException after {timeout_seconds}s timeout")
+
                     self.yolo_detector.last_detection_time = 0 # Ensure we can detect immediately
                     self.reset_trigger = True
+
+                    print("[Gemini] monitor_timeout: Raising SessionResetException...")
                     raise SessionResetException()
 
     async def receive_responses(self):
@@ -1188,16 +1191,20 @@ class AudioLoop:
                     if resume_retry_delay > 0:
                         await asyncio.sleep(resume_retry_delay)
                     continue
-                except SessionResetException:
+                except SessionResetException as e:
+                    print(f"[Gemini] Caught SessionResetException: {e}")
                     print("[Gemini] Session ended. Returning to detection wait state.")
-                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Session reset, returning to detection wait")
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Session reset exception caught, returning to detection wait")
                     self._clear_session_resumption()
                     self.session_active.clear()
                     self.detection_triggered = False
                     self.mic_is_active.clear()
+                    print("[Gemini] Calling _reset_detection_state...")
                     # YOLOの通知フラグをリセット（次の人物検出を可能にする）
                     self._reset_detection_state()
+                    print("[Gemini] _reset_detection_state completed. Sleeping 1s...")
                     await asyncio.sleep(1)
+                    print("[Gemini] Sleep complete. Continuing to next iteration...")
                     continue
                 except Exception as e:
                     if is_resume_exception(e):
@@ -1211,14 +1218,19 @@ class AudioLoop:
                         continue
 
                     if is_reset_exception(e):
+                        print(f"[Gemini] Detected reset exception in ExceptionGroup: {type(e).__name__}")
                         print("[Gemini] Session ended. Returning to detection wait state.")
+                        Logger.log_system_event("INFO", "Gemini lifecycle", message=f"Reset exception in group ({type(e).__name__}), returning to detection wait")
                         self._clear_session_resumption()
                         self.session_active.clear()
                         self.detection_triggered = False
                         self.mic_is_active.clear()
+                        print("[Gemini] Calling _reset_detection_state...")
                         # YOLOの通知フラグをリセット（次の人物検出を可能にする）
                         self._reset_detection_state()
+                        print("[Gemini] _reset_detection_state completed. Sleeping 1s...")
                         await asyncio.sleep(1)
+                        print("[Gemini] Sleep complete. Continuing to next iteration...")
                         continue
 
                     if is_transient_connect_error(e):
