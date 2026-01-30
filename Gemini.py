@@ -234,6 +234,11 @@ class AudioLoop:
         self.resume_reason = None
         self.resume_time_left = None
 
+        # 再接続制限とバックオフ
+        self.consecutive_connection_failures = 0
+        self.max_consecutive_failures = 10  # 連続失敗の上限
+        self.last_connection_attempt_time = 0.0
+
     @staticmethod
     def _get_field(obj, name):
         if obj is None:
@@ -428,9 +433,15 @@ class AudioLoop:
         while True:
             jpeg_bytes = await asyncio.to_thread(self._get_screen_jpeg_bytes)
             await asyncio.sleep(1.0)
-            await self.out_queue.put(
-                ("video", types.Blob(data=jpeg_bytes, mime_type="image/jpeg"))
-            )
+            try:
+                # タイムアウト付きでputを実行 (Queue溢れ対策)
+                await asyncio.wait_for(
+                    self.out_queue.put(("video", types.Blob(data=jpeg_bytes, mime_type="image/jpeg"))),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                Logger.log_system_error("get_screen queue overflow", message="Queue full, dropping video frame")
+                print("[Gemini Warning] Video queue full, dropping frame")
 
     async def send_realtime(self):
         """out_queue から Live API にリアルタイム送信"""
@@ -476,12 +487,20 @@ class AudioLoop:
             while True:
                 data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
                 if self.mic_is_active.is_set():
-                    await self.out_queue.put(
-                        (
-                            "audio",
-                            types.Blob(data=data, mime_type="audio/pcm;rate=16000"),
+                    try:
+                        # タイムアウト付きでputを実行 (Queue溢れ対策)
+                        await asyncio.wait_for(
+                            self.out_queue.put(
+                                (
+                                    "audio",
+                                    types.Blob(data=data, mime_type="audio/pcm;rate=16000"),
+                                )
+                            ),
+                            timeout=2.0
                         )
-                    )
+                    except asyncio.TimeoutError:
+                        Logger.log_system_error("listen_audio queue overflow", message="Queue full, dropping audio chunk")
+                        print("[Gemini Warning] Audio queue full, dropping chunk")
         finally:
             if self.audio_stream:
                 try:
@@ -845,13 +864,35 @@ class AudioLoop:
                             raise SessionResetException()
 
                 finally:
+                    # タスクのクリーンアップ (タスクリーク防止)
                     if monitor_task:
                         monitor_task.cancel()
                         try:
                             await monitor_task
                         except asyncio.CancelledError:
                             pass
-                    
+                        except Exception as e:
+                            Logger.log_system_error("monitor_task cleanup", e)
+
+                    if capture_task:
+                        if not capture_task.done():
+                            capture_task.cancel()
+                        try:
+                            await asyncio.wrap_future(capture_task)
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as e:
+                            Logger.log_system_error("capture_task cleanup", e)
+                            print(f"[Gemini] Capture task cleanup error: {e}")
+
+                    # リソースクローズ (リソースリーク防止)
+                    if player:
+                        try:
+                            player.close()
+                        except Exception as e:
+                            Logger.log_system_error("player.close()", e)
+                            print(f"[Gemini] Player close error: {e}")
+
                     if self.resume_trigger:
                         should_resume_mic = True
 
@@ -865,19 +906,23 @@ class AudioLoop:
                         self.mic_is_active.clear()
                         print("--- Mic kept muted (End_Talk/Timeout) ---")
 
-                    await asyncio.to_thread(update_pose, "default")
+                    try:
+                        await asyncio.to_thread(update_pose, "default")
+                    except Exception as e:
+                        Logger.log_system_error("update_pose(default)", e)
 
                     # YOLOを通常FPSモードに戻す
                     if self.yolo_detector:
-                        self.yolo_detector.set_low_fps_mode(False)
+                        try:
+                            self.yolo_detector.set_low_fps_mode(False)
+                        except Exception as e:
+                            Logger.log_system_error("YOLO set_low_fps_mode", e)
 
-                    if player:
-                        player.close()
         finally:
             # 終了時に保留中のタスクがあればキャンセルして例外を回収する
             if next_packet_task and not next_packet_task.done():
                 next_packet_task.cancel()
-            
+
             if next_packet_task:
                 try:
                     await next_packet_task
@@ -885,7 +930,10 @@ class AudioLoop:
                     pass
 
             if audio_out_stream:
-                audio_out_stream.close()
+                try:
+                    audio_out_stream.close()
+                except Exception as e:
+                    Logger.log_system_error("audio_out_stream.close()", e)
 
 
     async def run(self):
@@ -1046,18 +1094,45 @@ class AudioLoop:
             resume_pending = False
             resume_retry_delay = float(getattr(config, "SESSION_RESUMPTION_RETRY_WAIT_SECONDS", 0.5))
 
+            session_loop_count = 0
             while True:
+                session_loop_count += 1
+                Logger.log_system_event("INFO", "Gemini session loop",
+                    message=f"Loop iteration #{session_loop_count}, consecutive_failures={self.consecutive_connection_failures}")
+
                 # セッション開始待機 or 再開
                 if not resume_pending:
                     print("[Gemini] Waiting for person detection to start session...")
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
                     self.session_active.clear()
                     self._reset_detection_state()
                     await self.session_active.wait()
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Person detected, starting session")
                 else:
                     print("[Gemini] Resuming session with stored handle...")
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Resuming session with stored handle")
                 resume_pending = False
 
                 try:
+                    # 連続失敗回数チェック
+                    if self.consecutive_connection_failures >= self.max_consecutive_failures:
+                        error_msg = f"連続{self.consecutive_connection_failures}回の接続失敗。セッションを停止します。"
+                        Logger.log_system_error("Gemini 接続失敗上限", message=error_msg)
+                        print(f"[Gemini Error] {error_msg}")
+                        break
+
+                    # バックオフ計算 (指数バックオフ)
+                    if self.consecutive_connection_failures > 0:
+                        current_time = time.time()
+                        backoff_delay = min(2 ** self.consecutive_connection_failures, 60)  # 最大60秒
+                        time_since_last_attempt = current_time - self.last_connection_attempt_time
+                        if time_since_last_attempt < backoff_delay:
+                            wait_time = backoff_delay - time_since_last_attempt
+                            print(f"[Gemini] Backoff wait: {wait_time:.1f}s (failure #{self.consecutive_connection_failures})")
+                            await asyncio.sleep(wait_time)
+
+                    self.last_connection_attempt_time = time.time()
+
                     # 接続試行
                     if vad_config:
                         try:
@@ -1078,10 +1153,14 @@ class AudioLoop:
                     else:
                         await start_session(with_session_resumption(config_no_vad))
 
+                    # 接続成功 - カウンターをリセット
+                    self.consecutive_connection_failures = 0
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Session connected successfully")
                     break # Normal exit
 
                 except SessionResumeException:
                     print("[Gemini] Session resumption requested. Reconnecting...")
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Session resumption requested")
                     self.resume_trigger = False
                     self.resume_reason = None
                     self.resume_time_left = None
@@ -1091,6 +1170,7 @@ class AudioLoop:
                     continue
                 except SessionResetException:
                     print("[Gemini] Session ended. Returning to detection wait state.")
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Session reset, returning to detection wait")
                     self._clear_session_resumption()
                     self.session_active.clear()
                     self.detection_triggered = False
@@ -1118,6 +1198,9 @@ class AudioLoop:
                         continue
 
                     if is_transient_connect_error(e):
+                        # 失敗カウンターをインクリメント
+                        self.consecutive_connection_failures += 1
+
                         retry_delay = float(getattr(config, "CONNECT_RETRY_WAIT_SECONDS", 5))
                         Logger.log_system_event(
                             "INFO",
@@ -1127,6 +1210,7 @@ class AudioLoop:
                                 f"session_active={self.session_active.is_set()}; "
                                 f"resume_pending={resume_pending}; "
                                 f"has_resumption_handle={bool(self.session_resumption_handle)}; "
+                                f"consecutive_failures={self.consecutive_connection_failures}; "
                                 f"error={type(e).__name__}: {e}"
                             ),
                         )
@@ -1140,7 +1224,8 @@ class AudioLoop:
                                     f"retry_delay={resume_retry_delay:.1f}s; "
                                     f"session_active={self.session_active.is_set()}; "
                                     f"resume_pending={resume_pending}; "
-                                    f"has_resumption_handle={bool(self.session_resumption_handle)}"
+                                    f"has_resumption_handle={bool(self.session_resumption_handle)}; "
+                                    f"consecutive_failures={self.consecutive_connection_failures}"
                                 ),
                             )
                             resume_pending = True
@@ -1162,10 +1247,11 @@ class AudioLoop:
                                 f"retry_delay={retry_delay:.1f}s; "
                                 f"session_active={self.session_active.is_set()}; "
                                 f"resume_pending={resume_pending}; "
-                                f"has_resumption_handle={bool(self.session_resumption_handle)}"
+                                f"has_resumption_handle={bool(self.session_resumption_handle)}; "
+                                f"consecutive_failures={self.consecutive_connection_failures}"
                             ),
                         )
-                        print(f"[Gemini] Connection error. Retrying after {retry_delay:.1f}s...")
+                        print(f"[Gemini] Connection error. Retrying after {retry_delay:.1f}s... (failure #{self.consecutive_connection_failures})")
                         await asyncio.sleep(retry_delay)
                         continue
 

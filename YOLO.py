@@ -694,70 +694,95 @@ class YOLOOptimizer:
                 return
 
             print("\n[開始] 推論ループを開始します。")
-            
+
+            last_heartbeat_time = time.time()
+            heartbeat_interval = 30.0  # 30秒ごとにハートビート記録
+
             while not self.stop_event.is_set():
-                loop_start_time = time.time() # ループ開始時間
+                try:
+                    loop_start_time = time.time() # ループ開始時間
 
-                if self.pause_event.is_set():
-                    time.sleep(0.1)
-                    continue
+                    # ハートビート記録
+                    if loop_start_time - last_heartbeat_time >= heartbeat_interval:
+                        print(f"[YOLO] Heartbeat: Loop running (FPS: {self.fps:.1f})")
+                        last_heartbeat_time = loop_start_time
 
-                ret, frame = cap.read()
-                if not ret:
-                    print("[情報] 映像ストリーム終了")
-                    break
+                    if self.pause_event.is_set():
+                        time.sleep(0.1)
+                        continue
 
-                self.current_frame_for_capture = frame.copy()
+                    ret, frame = cap.read()
+                    if not ret:
+                        message = "映像ストリーム終了 (カメラ切断またはエラー)"
+                        print(f"[情報] {message}")
+                        Logger.log_system_error("YOLO カメラストリーム", message=message)
+                        break
 
-                h, w = frame.shape[:2]
-                h_scale = h / self.input_height
-                w_scale = w / self.input_width
+                    self.current_frame_for_capture = frame.copy()
 
-                input_tensor = np.expand_dims(frame, 0)
+                    h, w = frame.shape[:2]
+                    h_scale = h / self.input_height
+                    w_scale = w / self.input_width
 
-                # メインモデルの推論開始
-                self.infer_queue.start_async(
-                    inputs={0: input_tensor},
-                    userdata=(frame, time.time(), h_scale, w_scale)
-                )
+                    input_tensor = np.expand_dims(frame, 0)
 
-                # 顔検出モデルの推論開始 (OpenVINO)
-                if self.face_infer_queue:
-                    self.face_infer_queue.start_async(
+                    # メインモデルの推論開始
+                    self.infer_queue.start_async(
                         inputs={0: input_tensor},
                         userdata=(frame, time.time(), h_scale, w_scale)
                     )
 
-                # 結果の取得 (メイン)
-                try:
-                    while True:
-                        _, r_results, r_time = self.result_queue.get_nowait()
-                        self.latest_results = r_results
-                        self.inference_time_ms = r_time
-                except queue.Empty:
-                    pass
+                    # 顔検出モデルの推論開始 (OpenVINO)
+                    if self.face_infer_queue:
+                        self.face_infer_queue.start_async(
+                            inputs={0: input_tensor},
+                            userdata=(frame, time.time(), h_scale, w_scale)
+                        )
 
-                # 結果の取得 (顔)
-                try:
-                    while True:
-                        f_results = self.face_result_queue.get_nowait()
-                        self.latest_face_results = f_results
-                except queue.Empty:
-                    pass
-                
-                display_frame = frame.copy()
-                self._draw_results(display_frame, self.latest_results, self.latest_face_results, self.inference_time_ms)
-                cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
+                    # 結果の取得 (メイン)
+                    try:
+                        while True:
+                            _, r_results, r_time = self.result_queue.get_nowait()
+                            self.latest_results = r_results
+                            self.inference_time_ms = r_time
+                    except queue.Empty:
+                        pass
 
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("[終了] ユーザー指示")
-                    break
-                
-                # FPS制御
-                elapsed_time = time.time() - loop_start_time
-                target_frame_time = 1.0 / self.target_fps
-                if elapsed_time < target_frame_time:
-                    time.sleep(target_frame_time - elapsed_time)
+                    # 結果の取得 (顔)
+                    try:
+                        while True:
+                            f_results = self.face_result_queue.get_nowait()
+                            self.latest_face_results = f_results
+                    except queue.Empty:
+                        pass
+
+                    display_frame = frame.copy()
+                    self._draw_results(display_frame, self.latest_results, self.latest_face_results, self.inference_time_ms)
+
+                    try:
+                        cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            print("[終了] ユーザー指示")
+                            break
+                    except Exception as cv_err:
+                        # cv2.waitKey/imshowがハングまたは例外を起こした場合
+                        Logger.log_system_error("YOLO OpenCV表示", cv_err)
+                        print(f"[YOLO Warning] OpenCV display error: {cv_err}")
+                        # 継続して処理を続ける（表示なしで）
+
+                    # FPS制御
+                    elapsed_time = time.time() - loop_start_time
+                    target_frame_time = 1.0 / self.target_fps
+                    if elapsed_time < target_frame_time:
+                        time.sleep(target_frame_time - elapsed_time)
+
+                except Exception as loop_err:
+                    # ループ内での予期しないエラーをキャッチ
+                    Logger.log_system_error("YOLO ループ内エラー", loop_err)
+                    print(f"[YOLO Error] Loop error: {loop_err}")
+                    traceback.print_exc()
+                    # ループを継続（致命的でない限り）
+                    time.sleep(0.1)
 
         except Exception as e:
             Logger.log_system_error("YOLO 実行", e)
