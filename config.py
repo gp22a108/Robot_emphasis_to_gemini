@@ -92,6 +92,8 @@ SPEECH_SILENCE_DURATION_MS = 200
 # --- YOLO表示/カメラ再接続設定 ---
 # OpenCVの表示ウィンドウを使う場合は True
 SHOW_OPENCV_WINDOW = True
+# ワーカースレッドからOpenCVウィンドウを出すことを許可
+ALLOW_OPENCV_WINDOW_IN_THREAD = True
 # カメラ/RTSPが一時的に切れた時に自動再接続する
 AUTO_RECONNECT_CAMERA = True
 # 再接続の待機時間 (秒)

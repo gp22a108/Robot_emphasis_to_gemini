@@ -752,9 +752,14 @@ class YOLOOptimizer:
 
             show_window = bool(getattr(config, "SHOW_OPENCV_WINDOW", True))
             if show_window and threading.current_thread() is not threading.main_thread():
-                show_window = False
-                print("[YOLO] OpenCV window disabled (not running in main thread).")
-                Logger.log_system_event("INFO", "YOLO viewer", message="OpenCV window disabled (not in main thread)")
+                allow_in_thread = bool(getattr(config, "ALLOW_OPENCV_WINDOW_IN_THREAD", True))
+                if not allow_in_thread:
+                    show_window = False
+                    print("[YOLO] OpenCV window disabled (not running in main thread).")
+                    Logger.log_system_event("INFO", "YOLO viewer", message="OpenCV window disabled (not in main thread)")
+                else:
+                    print("[YOLO] OpenCV window enabled in worker thread (ALLOW_OPENCV_WINDOW_IN_THREAD=True).")
+                    Logger.log_system_event("INFO", "YOLO viewer", message="OpenCV window allowed in worker thread")
 
             cap = self._open_camera(source)
             if not cap:
