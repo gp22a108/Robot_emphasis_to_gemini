@@ -133,22 +133,22 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                                 # 新しいキーの場合はpose_dataに追加（必要に応じて）
                                 pose_data[key] = value
 
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                response = {'status': 'success', 'message': 'Pose data updated'}
                 try:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    response = {'status': 'success', 'message': 'Pose data updated'}
                     self.wfile.write(json.dumps(response).encode('utf-8'))
                 except (ConnectionAbortedError, BrokenPipeError):
                     # print("Client disconnected before response could be sent.")
                     pass
 
             except json.JSONDecodeError:
-                self.send_response(400)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                response = {'status': 'error', 'message': 'Invalid JSON'}
                 try:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    response = {'status': 'error', 'message': 'Invalid JSON'}
                     self.wfile.write(json.dumps(response).encode('utf-8'))
                 except (ConnectionAbortedError, BrokenPipeError):
                     pass
@@ -161,7 +161,8 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     response = {'status': 'error', 'message': str(e)}
                     self.wfile.write(json.dumps(response).encode('utf-8'))
-                except (ConnectionAbortedError, BrokenPipeError):
+                except (ConnectionAbortedError, BrokenPipeError, OSError):
+                    # クライアント切断やソケットエラーを無視
                     pass
         else:
             self.send_response(404)
