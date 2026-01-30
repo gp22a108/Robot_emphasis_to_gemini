@@ -1195,6 +1195,8 @@ class AudioLoop:
                     self.session_active.clear()
                     self.detection_triggered = False
                     self.mic_is_active.clear()
+                    # YOLOの通知フラグをリセット（次の人物検出を可能にする）
+                    self._reset_detection_state()
                     await asyncio.sleep(1)
                     continue
                 except Exception as e:
@@ -1214,6 +1216,8 @@ class AudioLoop:
                         self.session_active.clear()
                         self.detection_triggered = False
                         self.mic_is_active.clear()
+                        # YOLOの通知フラグをリセット（次の人物検出を可能にする）
+                        self._reset_detection_state()
                         await asyncio.sleep(1)
                         continue
 
