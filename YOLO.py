@@ -123,12 +123,19 @@ class YOLOOptimizer:
 
     def reset_notification_flag(self, defer: bool = False):
         """通知済みフラグをリセットする（セッション終了時などに呼ぶ）"""
-        if defer:
-            self.pending_notification_reset = True
-            return
-        self.has_notified_in_session = False
-        self.pending_notification_reset = False
-        print("[YOLO] Notification flag reset.")
+        try:
+            with self.lock:
+                if defer:
+                    self.pending_notification_reset = True
+                    print("[YOLO] Notification flag reset (deferred).")
+                    return
+                self.has_notified_in_session = False
+                self.pending_notification_reset = False
+                print("[YOLO] Notification flag reset.")
+                Logger.log_system_event("INFO", "YOLO notification flag", message="Flag reset completed")
+        except Exception as e:
+            Logger.log_system_error("YOLO reset_notification_flag", e)
+            print(f"[YOLO Error] Failed to reset notification flag: {e}")
 
     def _initialize_dependencies(self):
         """依存ライブラリとモデルの初期化（別スレッドで実行）"""
@@ -613,10 +620,16 @@ class YOLOOptimizer:
             pass
 
         if self.pending_notification_reset:
-            reset_after = float(getattr(config, "SESSION_TIMEOUT_SECONDS", 30))
-            if self.last_large_person_time == 0.0 or (current_time - self.last_large_person_time) > reset_after:
-                self.has_notified_in_session = False
-                self.pending_notification_reset = False
+            try:
+                reset_after = float(getattr(config, "SESSION_TIMEOUT_SECONDS", 30))
+                if self.last_large_person_time == 0.0 or (current_time - self.last_large_person_time) > reset_after:
+                    with self.lock:
+                        self.has_notified_in_session = False
+                        self.pending_notification_reset = False
+                        print("[YOLO] Notification flag reset (auto, after timeout).")
+            except Exception as e:
+                Logger.log_system_error("YOLO pending_notification_reset", e)
+                print(f"[YOLO Error] Failed to reset pending notification: {e}")
 
         # ロボット追跡コマンドの送信
         if closest_person_cx is not None:
@@ -790,6 +803,7 @@ class YOLOOptimizer:
             traceback.print_exc()
         finally:
             print("[待機] 推論タスク完了待ち...")
+            Logger.log_system_error("YOLO thread終了", message="YOLO thread is shutting down")
             if self.infer_queue:
                 self.infer_queue.wait_all()
             if self.face_infer_queue:
@@ -799,6 +813,7 @@ class YOLOOptimizer:
             if cv2:
                 cv2.destroyAllWindows()
             print("[YOLO] 終了しました")
+            Logger.log_system_event("INFO", "YOLO lifecycle", message="YOLO thread terminated")
 
     def get_current_frame(self):
         return self.current_frame_for_capture
