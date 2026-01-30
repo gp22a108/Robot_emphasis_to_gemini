@@ -413,6 +413,26 @@ class AudioLoop:
                 print(f"[Gemini Error] Failed to reset detection state: {e}")
                 traceback.print_exc()
 
+    def _ensure_yolo_running(self):
+        """Ensure YOLO thread is alive while waiting for detection."""
+        if not self.yolo_detector:
+            return
+        thread_alive = self.yolo_detector.thread and self.yolo_detector.thread.is_alive()
+        if thread_alive:
+            return
+        Logger.log_system_error("YOLO watchdog", message="YOLO thread not alive, restarting")
+        print("[Gemini Error] YOLO thread is not running! Attempting to restart...")
+        self.yolo_detector.start()
+
+    async def _wait_for_detection(self):
+        """Wait for detection trigger while periodically checking YOLO health."""
+        while True:
+            try:
+                await asyncio.wait_for(self.session_active.wait(), timeout=1.0)
+                return
+            except asyncio.TimeoutError:
+                self._ensure_yolo_running()
+
     async def send_text(self):
         """標準入力からテキストを Live API に送信"""
         while True:
@@ -1129,7 +1149,7 @@ class AudioLoop:
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
                     self.session_active.clear()
                     self._reset_detection_state()
-                    await self.session_active.wait()
+                    await self._wait_for_detection()
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Person detected, starting session")
                 else:
                     print("[Gemini] Resuming session with stored handle...")

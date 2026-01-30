@@ -58,6 +58,7 @@ class YOLOOptimizer:
         self.pause_event = threading.Event()
         self.current_frame_for_capture = None
         self.last_person_seen_time = 0.0
+        self.last_frame_time = 0.0
         self.is_ready_event = threading.Event() # 初期化完了フラグ
         
         # Gemini応答保持用
@@ -259,6 +260,48 @@ class YOLOOptimizer:
 
         ppp.input(input_tensor_name).model().set_layout(ov.Layout('NCHW'))
         model = ppp.build()
+
+    def _should_reconnect_source(self, source):
+        if not getattr(config, "AUTO_RECONNECT_CAMERA", True):
+            return False
+        if isinstance(source, int):
+            return True
+        if isinstance(source, str):
+            src = source.strip().lower()
+            if src.startswith(("rtsp://", "http://", "https://")):
+                return True
+        return False
+
+    def _open_camera(self, source):
+        cap = cv2.VideoCapture(source)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+        if not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
+            return None
+        return cap
+
+    def _reconnect_camera(self, source):
+        base_delay = float(getattr(config, "CAMERA_RECONNECT_BASE_DELAY_SECONDS", 0.5))
+        max_delay = float(getattr(config, "CAMERA_RECONNECT_MAX_DELAY_SECONDS", 5.0))
+        backoff = float(getattr(config, "CAMERA_RECONNECT_BACKOFF", 1.5))
+        attempt = 0
+        while not self.stop_event.is_set():
+            attempt += 1
+            delay = min(max_delay, base_delay * (backoff ** (attempt - 1)))
+            print(f"[YOLO] Camera reconnect attempt {attempt}, waiting {delay:.1f}s...")
+            Logger.log_system_event("INFO", "YOLO camera reconnect", message=f"attempt={attempt}, delay={delay:.1f}s")
+            time.sleep(delay)
+            cap = self._open_camera(source)
+            if cap:
+                print("[YOLO] Camera reconnected.")
+                Logger.log_system_event("INFO", "YOLO camera reconnect", message="Reconnected successfully")
+                return cap
+        return None
 
     def _completion_callback(self, request, userdata):
         try:
@@ -701,19 +744,27 @@ class YOLOOptimizer:
         return frame
 
     def run(self, source=None):
+        show_window = False
         try:
             self._initialize_dependencies()
             if source is None:
                 source = config.VIDEO_SOURCE
 
-            cap = cv2.VideoCapture(source)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
-            cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+            show_window = bool(getattr(config, "SHOW_OPENCV_WINDOW", True))
+            if show_window and threading.current_thread() is not threading.main_thread():
+                show_window = False
+                print("[YOLO] OpenCV window disabled (not running in main thread).")
+                Logger.log_system_event("INFO", "YOLO viewer", message="OpenCV window disabled (not in main thread)")
 
-            if not cap.isOpened():
-                print("[エラー] カメラを開けませんでした。")
-                return
+            cap = self._open_camera(source)
+            if not cap:
+                if self._should_reconnect_source(source):
+                    print("[YOLO] Camera open failed. Attempting to reconnect...")
+                    Logger.log_system_event("INFO", "YOLO camera reconnect", message="Initial open failed, starting reconnect loop")
+                    cap = self._reconnect_camera(source)
+                if not cap:
+                    print("[エラー] カメラを開けませんでした。")
+                    return
 
             print("\n[開始] 推論ループを開始します。")
 
@@ -748,8 +799,17 @@ class YOLOOptimizer:
                         message = f"映像ストリーム終了 (カメラ切断またはエラー) at iteration {loop_iteration}"
                         print(f"[情報] {message}")
                         Logger.log_system_error("YOLO カメラストリーム", message=message)
+                        if self._should_reconnect_source(source):
+                            try:
+                                cap.release()
+                            except Exception:
+                                pass
+                            cap = self._reconnect_camera(source)
+                            if cap:
+                                continue
                         break
 
+                    self.last_frame_time = time.time()
                     self.current_frame_for_capture = frame.copy()
 
                     h, w = frame.shape[:2]
@@ -791,16 +851,17 @@ class YOLOOptimizer:
                     display_frame = frame.copy()
                     self._draw_results(display_frame, self.latest_results, self.latest_face_results, self.inference_time_ms)
 
-                    try:
-                        cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            print("[終了] ユーザー指示")
-                            break
-                    except Exception as cv_err:
-                        # cv2.waitKey/imshowがハングまたは例外を起こした場合
-                        Logger.log_system_error("YOLO OpenCV表示", cv_err)
-                        print(f"[YOLO Warning] OpenCV display error: {cv_err}")
-                        # 継続して処理を続ける（表示なしで）
+                    if show_window:
+                        try:
+                            cv2.imshow("YOLOv12 - Visualized Detection", display_frame)
+                            if cv2.waitKey(1) & 0xFF == ord('q'):
+                                print("[終了] ユーザー指示")
+                                break
+                        except Exception as cv_err:
+                            # cv2.waitKey/imshowがハングまたは例外を起こした場合
+                            Logger.log_system_error("YOLO OpenCV表示", cv_err)
+                            print(f"[YOLO Warning] OpenCV display error: {cv_err}")
+                            # 継続して処理を続ける（表示なしで）
 
                     # FPS制御
                     elapsed_time = time.time() - loop_start_time
@@ -840,7 +901,7 @@ class YOLOOptimizer:
                 self.face_infer_queue.wait_all()
             if 'cap' in locals() and cap:
                 cap.release()
-            if cv2:
+            if cv2 and show_window:
                 cv2.destroyAllWindows()
             print(f"[YOLO] 終了しました ({exit_reason})")
             Logger.log_system_event("INFO", "YOLO lifecycle", message=f"YOLO thread terminated: {exit_reason}")

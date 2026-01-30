@@ -30,7 +30,7 @@ DETECTION_INTERVAL = 1.0
 
 # --- セッション・タイムアウト設定 ---
 # 人物が検出されなくなってからセッションを終了するまでの時間 (秒)
-# 30秒に延長（移動中などのロスト対策）
+# 5秒
 SESSION_TIMEOUT_SECONDS = 5
 # Session connect timeout (seconds)
 SESSION_CONNECT_TIMEOUT_SECONDS = 30
@@ -88,6 +88,16 @@ MAX_WORKERS = 1
 # 値を小さくすると、発話終了の判定が早くなります（キレが良い）。
 # 値を大きくすると、発話終了の判定が遅くなります（間を許容する）。
 SPEECH_SILENCE_DURATION_MS = 200
+
+# --- YOLO表示/カメラ再接続設定 ---
+# OpenCVの表示ウィンドウを使う場合は True
+SHOW_OPENCV_WINDOW = True
+# カメラ/RTSPが一時的に切れた時に自動再接続する
+AUTO_RECONNECT_CAMERA = True
+# 再接続の待機時間 (秒)
+CAMERA_RECONNECT_BASE_DELAY_SECONDS = 0.5
+CAMERA_RECONNECT_MAX_DELAY_SECONDS = 5.0
+CAMERA_RECONNECT_BACKOFF = 1.5
 
 # 旧設定 (無効化)
 # VAD_POSITIVE_THRESHOLD = 0.0
