@@ -728,9 +728,15 @@ class YOLOOptimizer:
 
                     # ハートビート記録
                     if loop_start_time - last_heartbeat_time >= heartbeat_interval:
-                        print(f"[YOLO] Heartbeat: Loop running (FPS: {self.fps:.1f}, iteration: {loop_iteration})")
+                        # メモリ使用量を取得
+                        import psutil
+                        process = psutil.Process()
+                        mem_info = process.memory_info()
+                        mem_mb = mem_info.rss / 1024 / 1024
+
+                        print(f"[YOLO] Heartbeat: Loop running (FPS: {self.fps:.1f}, iteration: {loop_iteration}, memory: {mem_mb:.1f}MB)")
                         Logger.log_system_event("INFO", "YOLO heartbeat",
-                            message=f"Loop iteration {loop_iteration}, FPS {self.fps:.1f}, stop_event={self.stop_event.is_set()}, pause_event={self.pause_event.is_set()}")
+                            message=f"Loop iteration {loop_iteration}, FPS {self.fps:.1f}, stop_event={self.stop_event.is_set()}, pause_event={self.pause_event.is_set()}, memory_mb={mem_mb:.1f}")
                         last_heartbeat_time = loop_start_time
 
                     if self.pause_event.is_set():

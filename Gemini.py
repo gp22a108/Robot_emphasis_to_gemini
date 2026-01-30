@@ -31,6 +31,8 @@ import traceback
 import argparse
 import io
 import requests
+import signal
+import atexit
 
 # 設定ファイル
 import config
@@ -1297,7 +1299,26 @@ class AudioLoop:
             print(f"wall={elapsed_wall:.6f}s cpu={elapsed_cpu:.6f}s")
 
 
+def handle_termination(signum=None, frame=None):
+    """プロセス終了時のハンドラー"""
+    import os
+    reason = f"Signal {signum}" if signum else "atexit"
+    Logger.log_system_error("Gemini プロセス終了", message=f"Process terminating due to {reason}, PID={os.getpid()}")
+    print(f"\n[Gemini] Process terminating: {reason}")
+    import sys
+    sys.stdout.flush()
+    sys.stderr.flush()
+
 if __name__ == "__main__":
+    import os
+
+    # 終了ハンドラーを登録
+    atexit.register(handle_termination)
+    signal.signal(signal.SIGTERM, handle_termination)
+    signal.signal(signal.SIGINT, handle_termination)
+    if hasattr(signal, 'SIGBREAK'):  # Windows
+        signal.signal(signal.SIGBREAK, handle_termination)
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
@@ -1307,6 +1328,9 @@ if __name__ == "__main__":
         choices=["camera", "screen", "none"],
     )
     args = parser.parse_args()
+
+    Logger.log_system_event("INFO", "Gemini プロセス起動", message=f"Starting with mode={args.mode}, PID={os.getpid()}")
+    print(f"[Gemini] Process starting with PID {os.getpid()}")
 
     main = AudioLoop(video_mode=args.mode)
     asyncio.run(main.run())
