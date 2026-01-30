@@ -107,6 +107,7 @@ class YOLOOptimizer:
         self.has_notified_in_session = False
         self.pending_notification_reset = False
         self.last_large_person_time = 0.0
+        self._last_camera_timeout_log = 0.0
 
     def is_ready(self):
         """初期化が完了したかどうかを返す"""
@@ -274,6 +275,7 @@ class YOLOOptimizer:
 
     def _open_camera(self, source):
         cap = cv2.VideoCapture(source)
+        self._configure_camera_capture(cap)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
@@ -284,6 +286,28 @@ class YOLOOptimizer:
                 pass
             return None
         return cap
+
+    def _configure_camera_capture(self, cap):
+        """カメラ入力の安定性向上のため、タイムアウト等の設定を試みる。"""
+        if not cap:
+            return
+        read_timeout_ms = int(float(getattr(config, "CAMERA_READ_TIMEOUT_SECONDS", 2.0)) * 1000)
+        # バッファを小さくして遅延を抑制
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        # OpenCVのタイムアウト設定（対応バックエンドのみ有効）
+        if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+            try:
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, read_timeout_ms)
+            except Exception:
+                pass
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+            try:
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_timeout_ms)
+            except Exception:
+                pass
 
     def _reconnect_camera(self, source):
         base_delay = float(getattr(config, "CAMERA_RECONNECT_BASE_DELAY_SECONDS", 0.5))
@@ -799,11 +823,29 @@ class YOLOOptimizer:
                         time.sleep(0.1)
                         continue
 
+                    read_timeout_s = float(getattr(config, "CAMERA_READ_TIMEOUT_SECONDS", 2.0))
+                    read_start = time.monotonic()
                     ret, frame = cap.read()
-                    if not ret:
-                        message = f"映像ストリーム終了 (カメラ切断またはエラー) at iteration {loop_iteration}"
+                    read_elapsed = time.monotonic() - read_start
+                    read_timed_out = read_timeout_s > 0 and read_elapsed > read_timeout_s
+                    if read_timed_out:
+                        message = (
+                            f"カメラ読み込みがタイムアウトしました "
+                            f"(elapsed={read_elapsed:.2f}s, timeout={read_timeout_s:.2f}s, iteration={loop_iteration})"
+                        )
+                        # 連続ログ抑制
+                        now = time.time()
+                        if now - self._last_camera_timeout_log > 5.0:
+                            Logger.log_system_error("YOLO カメラストリーム", message=message)
+                            self._last_camera_timeout_log = now
                         print(f"[情報] {message}")
-                        Logger.log_system_error("YOLO カメラストリーム", message=message)
+                        ret = False
+
+                    if not ret:
+                        if not read_timed_out:
+                            message = f"映像ストリーム終了 (カメラ切断またはエラー) at iteration {loop_iteration}"
+                            print(f"[情報] {message}")
+                            Logger.log_system_error("YOLO カメラストリーム", message=message)
                         if self._should_reconnect_source(source):
                             try:
                                 cap.release()
@@ -925,16 +967,21 @@ class YOLOOptimizer:
             self.pause_event.clear()
 
     def start(self):
-        if self.thread is None:
-            self.stop_event.clear()
-            
-            # ロボット制御用スレッドの開始
+        thread_alive = self.thread and self.thread.is_alive()
+        if thread_alive:
+            return
+
+        self.stop_event.clear()
+
+        # ロボット制御用スレッドの開始
+        if not self.command_thread or not self.command_thread.is_alive():
             self.command_thread = threading.Thread(target=self._command_worker, daemon=True)
             self.command_thread.start()
-            
-            self.thread = threading.Thread(target=self.run, daemon=True)
-            self.thread.start()
-            print("[YOLO] スレッドを開始しました。")
+
+        # YOLO検出スレッドの開始
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+        print("[YOLO] スレッドを開始しました。")
 
     def stop(self):
         if self.thread and self.thread.is_alive():
