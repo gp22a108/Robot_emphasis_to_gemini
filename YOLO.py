@@ -710,14 +710,18 @@ class YOLOOptimizer:
 
             last_heartbeat_time = time.time()
             heartbeat_interval = 30.0  # 30秒ごとにハートビート記録
+            loop_iteration = 0
 
             while not self.stop_event.is_set():
                 try:
+                    loop_iteration += 1
                     loop_start_time = time.time() # ループ開始時間
 
                     # ハートビート記録
                     if loop_start_time - last_heartbeat_time >= heartbeat_interval:
-                        print(f"[YOLO] Heartbeat: Loop running (FPS: {self.fps:.1f})")
+                        print(f"[YOLO] Heartbeat: Loop running (FPS: {self.fps:.1f}, iteration: {loop_iteration})")
+                        Logger.log_system_event("INFO", "YOLO heartbeat",
+                            message=f"Loop iteration {loop_iteration}, FPS {self.fps:.1f}, stop_event={self.stop_event.is_set()}, pause_event={self.pause_event.is_set()}")
                         last_heartbeat_time = loop_start_time
 
                     if self.pause_event.is_set():
@@ -726,7 +730,7 @@ class YOLOOptimizer:
 
                     ret, frame = cap.read()
                     if not ret:
-                        message = "映像ストリーム終了 (カメラ切断またはエラー)"
+                        message = f"映像ストリーム終了 (カメラ切断またはエラー) at iteration {loop_iteration}"
                         print(f"[情報] {message}")
                         Logger.log_system_error("YOLO カメラストリーム", message=message)
                         break
@@ -802,8 +806,19 @@ class YOLOOptimizer:
             print(f"[YOLO Error] {e}")
             traceback.print_exc()
         finally:
-            print("[待機] 推論タスク完了待ち...")
-            Logger.log_system_error("YOLO thread終了", message="YOLO thread is shutting down")
+            # ループ終了理由を記録
+            exit_reason = "unknown"
+            if 'loop_iteration' in locals():
+                exit_reason = f"Loop exited at iteration {loop_iteration}"
+            if self.stop_event.is_set():
+                exit_reason += ", stop_event was set"
+            if 'ret' in locals() and not ret:
+                exit_reason += ", camera stream ended"
+
+            print(f"[待機] 推論タスク完了待ち... ({exit_reason})")
+            Logger.log_system_error("YOLO thread終了",
+                message=f"YOLO thread is shutting down. Reason: {exit_reason}, stop_event={self.stop_event.is_set()}, loop_iteration={locals().get('loop_iteration', 'N/A')}")
+
             if self.infer_queue:
                 self.infer_queue.wait_all()
             if self.face_infer_queue:
@@ -812,8 +827,8 @@ class YOLOOptimizer:
                 cap.release()
             if cv2:
                 cv2.destroyAllWindows()
-            print("[YOLO] 終了しました")
-            Logger.log_system_event("INFO", "YOLO lifecycle", message="YOLO thread terminated")
+            print(f"[YOLO] 終了しました ({exit_reason})")
+            Logger.log_system_event("INFO", "YOLO lifecycle", message=f"YOLO thread terminated: {exit_reason}")
 
     def get_current_frame(self):
         return self.current_frame_for_capture
