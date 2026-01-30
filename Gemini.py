@@ -392,6 +392,9 @@ class AudioLoop:
         """Allow a new detection to trigger the next session."""
         if self.yolo_detector:
             try:
+                Logger.log_system_event("INFO", "Gemini _reset_detection_state ENTRY", message="Calling reset_notification_flag")
+                print("[Gemini] _reset_detection_state: Checking YOLO thread status...")
+
                 # YOLOスレッドの生存確認
                 if not self.yolo_detector.thread or not self.yolo_detector.thread.is_alive():
                     Logger.log_system_error("YOLO thread check", message="YOLO thread is not alive!")
@@ -399,10 +402,14 @@ class AudioLoop:
                     self.yolo_detector.start()
                     return
 
+                print("[Gemini] _reset_detection_state: YOLO thread is alive, calling reset_notification_flag...")
                 self.yolo_detector.reset_notification_flag(defer=False)
+                print("[Gemini] _reset_detection_state: reset_notification_flag returned successfully")
+                Logger.log_system_event("INFO", "Gemini _reset_detection_state EXIT", message="reset_notification_flag completed")
             except Exception as e:
                 Logger.log_system_error("Gemini _reset_detection_state", e)
                 print(f"[Gemini Error] Failed to reset detection state: {e}")
+                traceback.print_exc()
 
     async def send_text(self):
         """標準入力からテキストを Live API に送信"""

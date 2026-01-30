@@ -124,18 +124,27 @@ class YOLOOptimizer:
     def reset_notification_flag(self, defer: bool = False):
         """通知済みフラグをリセットする（セッション終了時などに呼ぶ）"""
         try:
+            thread_alive = self.thread and self.thread.is_alive()
+            Logger.log_system_event("INFO", "YOLO reset_notification_flag ENTRY",
+                message=f"defer={defer}, thread_alive={thread_alive}, stop_event={self.stop_event.is_set()}")
+            print(f"[YOLO] reset_notification_flag called (defer={defer}, thread_alive={thread_alive})")
+
             with self.lock:
                 if defer:
                     self.pending_notification_reset = True
                     print("[YOLO] Notification flag reset (deferred).")
+                    Logger.log_system_event("INFO", "YOLO reset_notification_flag EXIT", message="Deferred mode set")
                     return
                 self.has_notified_in_session = False
                 self.pending_notification_reset = False
                 print("[YOLO] Notification flag reset.")
                 Logger.log_system_event("INFO", "YOLO notification flag", message="Flag reset completed")
+
+            Logger.log_system_event("INFO", "YOLO reset_notification_flag EXIT", message="Normal completion")
         except Exception as e:
             Logger.log_system_error("YOLO reset_notification_flag", e)
             print(f"[YOLO Error] Failed to reset notification flag: {e}")
+            traceback.print_exc()
 
     def _initialize_dependencies(self):
         """依存ライブラリとモデルの初期化（別スレッドで実行）"""
