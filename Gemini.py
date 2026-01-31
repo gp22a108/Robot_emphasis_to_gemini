@@ -390,18 +390,20 @@ class AudioLoop:
                 self.loop,
             )
 
-    def _reset_detection_state(self):
+    async def _reset_detection_state(self):
         """Allow a new detection to trigger the next session."""
         if self.yolo_detector:
             try:
                 Logger.log_system_event("INFO", "Gemini _reset_detection_state ENTRY", message="Calling reset_notification_flag")
                 print("[Gemini] _reset_detection_state: Checking YOLO thread status...")
 
-                # YOLOスレッドの生存確認
+                # YOLOスレッドの生存確認と復旧 (Async)
+                await self._ensure_yolo_running()
+
+                # YOLOスレッドの生存確認 (再確認)
                 if not self.yolo_detector.thread or not self.yolo_detector.thread.is_alive():
-                    Logger.log_system_error("YOLO thread check", message="YOLO thread is not alive!")
-                    print("[Gemini Error] YOLO thread is not running! Attempting to restart...")
-                    self.yolo_detector.start()
+                    Logger.log_system_error("YOLO thread check", message="YOLO thread is not alive after ensure!")
+                    print("[Gemini Error] YOLO thread is not running after ensure check!")
                     return
 
                 print("[Gemini] _reset_detection_state: YOLO thread is alive, calling reset_notification_flag...")
@@ -413,16 +415,28 @@ class AudioLoop:
                 print(f"[Gemini Error] Failed to reset detection state: {e}")
                 traceback.print_exc()
 
-    def _ensure_yolo_running(self):
+    async def _ensure_yolo_running(self):
         """Ensure YOLO thread is alive while waiting for detection."""
         if not self.yolo_detector:
             return
+        
+        # Check if thread is alive
         thread_alive = self.yolo_detector.thread and self.yolo_detector.thread.is_alive()
+        
         if thread_alive:
+            # YOLOスレッドが生きている場合、ループが回っているか確認
+            if hasattr(self.yolo_detector, 'last_loop_time'):
+                time_since_last_loop = time.time() - self.yolo_detector.last_loop_time
+                if time_since_last_loop > 10.0: # 10秒以上ループが回っていない
+                    Logger.log_system_error("YOLO watchdog", message=f"YOLO thread stuck? Last loop {time_since_last_loop:.1f}s ago. Restarting...")
+                    print(f"[Gemini Warning] YOLO thread might be stuck (last loop {time_since_last_loop:.1f}s ago). Restarting...")
+                    # 重い処理なので別スレッドで実行
+                    await asyncio.to_thread(self.yolo_detector.restart)
             return
+            
         Logger.log_system_error("YOLO watchdog", message="YOLO thread not alive, restarting")
         print("[Gemini Error] YOLO thread is not running! Attempting to restart...")
-        self.yolo_detector.start()
+        await asyncio.to_thread(self.yolo_detector.start)
 
     async def _wait_for_detection(self):
         """Wait for detection trigger while periodically checking YOLO health."""
@@ -431,7 +445,7 @@ class AudioLoop:
                 await asyncio.wait_for(self.session_active.wait(), timeout=1.0)
                 return
             except asyncio.TimeoutError:
-                self._ensure_yolo_running()
+                await self._ensure_yolo_running()
 
     async def send_text(self):
         """標準入力からテキストを Live API に送信"""
@@ -679,10 +693,19 @@ class AudioLoop:
                         # 次のパケットを待つタスク
                         next_packet_task = asyncio.create_task(turn_iter.__anext__())
                         try:
-                            response = await next_packet_task
+                            # タイムアウトを設定して、長時間応答がない場合に検知できるようにする
+                            response_timeout = float(getattr(config, "RESPONSE_TIMEOUT_SECONDS", 20))
+                            response = await asyncio.wait_for(next_packet_task, timeout=response_timeout)
                         except StopAsyncIteration:
                             next_packet_task = None
                             break # ストリーム終了
+                        except asyncio.TimeoutError:
+                            print(f"[Gemini] Response timeout ({response_timeout}s). Resetting session.")
+                            Logger.log_system_error("Gemini Response Timeout", message=f"No response for {response_timeout}s")
+                            next_packet_task.cancel()
+                            next_packet_task = None
+                            self.reset_trigger = True
+                            raise SessionResetException()
                         except Exception as e:
                             if ConnectionClosedOK and isinstance(e, ConnectionClosedOK):
                                 self.reset_trigger = True
@@ -968,7 +991,7 @@ class AudioLoop:
 
             if next_packet_task:
                 try:
-                    await next_packet_task
+                    await asyncio.wait_for(next_packet_task, timeout=2.0)
                 except Exception:
                     pass
 
@@ -1148,7 +1171,7 @@ class AudioLoop:
                     print("[Gemini] Waiting for person detection to start session...")
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
                     self.session_active.clear()
-                    self._reset_detection_state()
+                    await self._reset_detection_state()
                     await self._wait_for_detection()
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Person detected, starting session")
                 else:
@@ -1221,7 +1244,7 @@ class AudioLoop:
                     self.mic_is_active.clear()
                     print("[Gemini] Calling _reset_detection_state...")
                     # YOLOの通知フラグをリセット（次の人物検出を可能にする）
-                    self._reset_detection_state()
+                    await self._reset_detection_state()
                     print("[Gemini] _reset_detection_state completed. Sleeping 1s...")
                     await asyncio.sleep(1)
                     print("[Gemini] Sleep complete. Continuing to next iteration...")
@@ -1247,7 +1270,7 @@ class AudioLoop:
                         self.mic_is_active.clear()
                         print("[Gemini] Calling _reset_detection_state...")
                         # YOLOの通知フラグをリセット（次の人物検出を可能にする）
-                        self._reset_detection_state()
+                        await self._reset_detection_state()
                         print("[Gemini] _reset_detection_state completed. Sleeping 1s...")
                         await asyncio.sleep(1)
                         print("[Gemini] Sleep complete. Continuing to next iteration...")

@@ -61,6 +61,9 @@ class YOLOOptimizer:
         self.last_frame_time = 0.0
         self.is_ready_event = threading.Event() # 初期化完了フラグ
         
+        # ループ監視用
+        self.last_loop_time = time.time()
+
         # Gemini応答保持用
         self.gemini_response = ""
         self.voicevox_message = ""
@@ -805,6 +808,7 @@ class YOLOOptimizer:
                 try:
                     loop_iteration += 1
                     loop_start_time = time.time() # ループ開始時間
+                    self.last_loop_time = loop_start_time # 外部監視用
 
                     # ハートビート記録
                     if loop_start_time - last_heartbeat_time >= heartbeat_interval:
@@ -999,6 +1003,16 @@ class YOLOOptimizer:
              
         self.thread = None
         self.command_thread = None
+
+    def restart(self):
+        """スレッドを強制的に停止して再起動する"""
+        print("[YOLO] Restarting YOLO thread...")
+        Logger.log_system_event("INFO", "YOLO lifecycle", message="Restart requested")
+        self.stop()
+        # 強制的にNoneにして再作成を促す
+        self.thread = None
+        time.sleep(1.0)
+        self.start()
 
 def simple_callback():
     pass
