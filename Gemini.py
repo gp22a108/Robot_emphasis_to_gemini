@@ -420,23 +420,28 @@ class AudioLoop:
         if not self.yolo_detector:
             return
         
-        # Check if thread is alive
-        thread_alive = self.yolo_detector.thread and self.yolo_detector.thread.is_alive()
-        
-        if thread_alive:
-            # YOLOスレッドが生きている場合、ループが回っているか確認
-            if hasattr(self.yolo_detector, 'last_loop_time'):
-                time_since_last_loop = time.time() - self.yolo_detector.last_loop_time
-                if time_since_last_loop > 10.0: # 10秒以上ループが回っていない
-                    Logger.log_system_error("YOLO watchdog", message=f"YOLO thread stuck? Last loop {time_since_last_loop:.1f}s ago. Restarting...")
-                    print(f"[Gemini Warning] YOLO thread might be stuck (last loop {time_since_last_loop:.1f}s ago). Restarting...")
-                    # 重い処理なので別スレッドで実行
-                    await asyncio.to_thread(self.yolo_detector.restart)
-            return
+        try:
+            # Check if thread is alive
+            thread_alive = self.yolo_detector.thread and self.yolo_detector.thread.is_alive()
             
-        Logger.log_system_error("YOLO watchdog", message="YOLO thread not alive, restarting")
-        print("[Gemini Error] YOLO thread is not running! Attempting to restart...")
-        await asyncio.to_thread(self.yolo_detector.start)
+            if thread_alive:
+                # YOLOスレッドが生きている場合、ループが回っているか確認
+                if hasattr(self.yolo_detector, 'last_loop_time'):
+                    time_since_last_loop = time.time() - self.yolo_detector.last_loop_time
+                    if time_since_last_loop > 10.0: # 10秒以上ループが回っていない
+                        Logger.log_system_error("YOLO watchdog", message=f"YOLO thread stuck? Last loop {time_since_last_loop:.1f}s ago. Restarting...")
+                        print(f"[Gemini Warning] YOLO thread might be stuck (last loop {time_since_last_loop:.1f}s ago). Restarting...")
+                        # 重い処理なので別スレッドで実行
+                        await asyncio.to_thread(self.yolo_detector.restart)
+                return
+                
+            Logger.log_system_error("YOLO watchdog", message="YOLO thread not alive, restarting")
+            print("[Gemini Error] YOLO thread is not running! Attempting to restart...")
+            await asyncio.to_thread(self.yolo_detector.start)
+        except Exception as e:
+            Logger.log_system_error("YOLO ensure running", e)
+            print(f"[Gemini Error] Failed to ensure YOLO is running: {e}")
+            await asyncio.sleep(1.0)
 
     async def _wait_for_detection(self):
         """Wait for detection trigger while periodically checking YOLO health."""
@@ -1168,12 +1173,18 @@ class AudioLoop:
 
                 # セッション開始待機 or 再開
                 if not resume_pending:
-                    print("[Gemini] Waiting for person detection to start session...")
-                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
-                    self.session_active.clear()
-                    await self._reset_detection_state()
-                    await self._wait_for_detection()
-                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Person detected, starting session")
+                    try:
+                        print("[Gemini] Waiting for person detection to start session...")
+                        Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
+                        self.session_active.clear()
+                        await self._reset_detection_state()
+                        await self._wait_for_detection()
+                        Logger.log_system_event("INFO", "Gemini lifecycle", message="Person detected, starting session")
+                    except Exception as e:
+                        Logger.log_system_error("Gemini detection wait", e)
+                        print(f"[Gemini Error] Error during detection wait: {e}")
+                        await asyncio.sleep(5.0)
+                        continue
                 else:
                     print("[Gemini] Resuming session with stored handle...")
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Resuming session with stored handle")
@@ -1182,10 +1193,12 @@ class AudioLoop:
                 try:
                     # 連続失敗回数チェック
                     if self.consecutive_connection_failures >= self.max_consecutive_failures:
-                        error_msg = f"連続{self.consecutive_connection_failures}回の接続失敗。セッションを停止します。"
+                        error_msg = f"連続{self.consecutive_connection_failures}回の接続失敗。待機時間を延長して再試行します。"
                         Logger.log_system_error("Gemini 接続失敗上限", message=error_msg)
                         print(f"[Gemini Error] {error_msg}")
-                        break
+                        await asyncio.sleep(60)
+                        self.consecutive_connection_failures = 0
+                        continue
 
                     # バックオフ計算 (指数バックオフ)
                     if self.consecutive_connection_failures > 0:
@@ -1361,7 +1374,9 @@ class AudioLoop:
                         self.audio_stream.close()
                     Logger.log_system_error("Gemini セッション", e)
                     traceback.print_exc()
-                    break
+                    print("[Gemini] Unexpected error in session loop. Retrying in 5s...")
+                    await asyncio.sleep(5.0)
+                    continue
 
         except asyncio.CancelledError:
             pass
