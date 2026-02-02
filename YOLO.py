@@ -1012,9 +1012,11 @@ class YOLOOptimizer:
                 message=f"YOLO thread is shutting down. Reason: {exit_reason}, stop_event={self.stop_event.is_set()}, loop_iteration={locals().get('loop_iteration', 'N/A')}")
 
             if self.infer_queue:
-                self.infer_queue.wait_all()
+                # self.infer_queue.wait_all() # <--- ここがハングの原因の可能性があるためコメントアウト
+                pass
             if self.face_infer_queue:
-                self.face_infer_queue.wait_all()
+                # self.face_infer_queue.wait_all() # <--- ここも同様
+                pass
             if 'cap' in locals() and cap:
                 cap.release()
             if cv2 and show_window:
