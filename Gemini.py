@@ -1120,6 +1120,9 @@ class AudioLoop:
                     "ConnectionClosedError",
                     "ConnectionClosedOK",
                     "WebSocketException",
+                    "ServiceUnavailable",
+                    "GatewayTimeout",
+                    "DeadlineExceeded",
                 }:
                     return True
                 error_str = str(e).lower()
@@ -1132,6 +1135,11 @@ class AudioLoop:
                     or "connection closed" in error_str
                     or "keepalive ping timeout" in error_str
                     or "getaddrinfo" in error_str
+                    or "deadline exceeded" in error_str
+                    or "service unavailable" in error_str
+                    or "gateway timeout" in error_str
+                    or "503" in error_str
+                    or "504" in error_str
                 )
 
             resume_pending = False
@@ -1159,10 +1167,23 @@ class AudioLoop:
                 try:
                     # 連続失敗回数チェック
                     if self.consecutive_connection_failures >= self.max_consecutive_failures:
-                        error_msg = f"連続{self.consecutive_connection_failures}回の接続失敗。セッションを停止します。"
+                        error_msg = f"連続{self.consecutive_connection_failures}回の接続失敗。セッションをリセットします。"
                         Logger.log_system_error("Gemini 接続失敗上限", message=error_msg)
                         print(f"[Gemini Error] {error_msg}")
-                        break
+                        
+                        self.consecutive_connection_failures = 0
+                        self.session_failed.set()
+                        self.session_active.clear()
+                        self.detection_triggered = False
+                        self.mic_is_active.clear()
+                        self._clear_session_resumption()
+                        if self.audio_stream:
+                            self.audio_stream.close()
+                            self.audio_stream = None
+                        
+                        self._reset_detection_state()
+                        await asyncio.sleep(5)
+                        continue
 
                     # バックオフ計算 (指数バックオフ)
                     if self.consecutive_connection_failures > 0:
