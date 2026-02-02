@@ -4,6 +4,7 @@ import threading
 import os
 import queue
 import traceback
+import sys
 from pathlib import Path
 import requests
 
@@ -54,6 +55,7 @@ class YOLOOptimizer:
         self.inference_time_ms = 0.0
         self.thread = None
         self.command_thread = None # ロボット制御用スレッド
+        self.watchdog_thread = None # 監視用スレッド
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.current_frame_for_capture = None
@@ -688,12 +690,13 @@ class YOLOOptimizer:
 
                         should_update_time = True
                         if self.on_detection:
-                            # コールバックが False を返したら時間を更新しない（Gemini準備中など）
-                            if self.on_detection() is False:
-                                should_update_time = False
-                            else:
-                                # 通知成功時、フラグを立てる
-                                self.has_notified_in_session = True
+                            try:
+                                # コールバックが False を返したら時間を更新しない（Gemini準備中など）
+                                if self.on_detection() is False:
+                                    should_update_time = False
+                            except Exception as e:
+                                Logger.log_system_error("YOLO on_detection callback", e)
+                                print(f"[YOLO Error] on_detection callback failed: {e}")
 
                         if should_update_time:
                             self.last_detection_time = current_time
@@ -786,6 +789,22 @@ class YOLOOptimizer:
 
         return frame
 
+    def _watchdog_worker(self):
+        """YOLOスレッドの生存監視"""
+        Logger.log_system_event("INFO", "YOLO Watchdog", message="Started")
+        print("[YOLO] Watchdog started.")
+        while not self.stop_event.is_set():
+            time.sleep(5)
+            if self.pause_event.is_set():
+                self.last_loop_time = time.time() # Prevent timeout during pause
+                continue
+            
+            elapsed = time.time() - self.last_loop_time
+            if elapsed > 30.0: # 30秒以上更新がない
+                msg = f"YOLO thread stalled for {elapsed:.1f}s (FPS: {self.fps:.1f})"
+                print(f"[YOLO Watchdog] {msg}")
+                Logger.log_system_error("YOLO Watchdog", message=msg)
+
     def run(self, source=None):
         show_window = False
         try:
@@ -795,6 +814,8 @@ class YOLOOptimizer:
 
             if source is None:
                 source = config.VIDEO_SOURCE
+
+            Logger.log_system_event("INFO", "YOLO run start", message=f"Source: {source}")
 
             show_window = bool(getattr(config, "SHOW_OPENCV_WINDOW", True))
             if show_window and threading.current_thread() is not threading.main_thread():
@@ -951,10 +972,12 @@ class YOLOOptimizer:
                     # ループを継続（致命的でない限り）
                     time.sleep(0.1)
 
-        except Exception as e:
-            Logger.log_system_error("YOLO 実行", e)
-            print(f"[YOLO Error] {e}")
+        except BaseException as e:
+            Logger.log_system_error("YOLO 実行 (BaseException)", e)
+            print(f"[YOLO Critical Error] {e}")
             traceback.print_exc()
+            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                raise
         finally:
             # ループ終了理由を記録
             exit_reason = "unknown"
@@ -1005,6 +1028,11 @@ class YOLOOptimizer:
             self.command_thread = threading.Thread(target=self._command_worker, daemon=True)
             self.command_thread.start()
 
+        # Watchdogの開始
+        if not self.watchdog_thread or not self.watchdog_thread.is_alive():
+            self.watchdog_thread = threading.Thread(target=self._watchdog_worker, daemon=True)
+            self.watchdog_thread.start()
+
         # YOLO検出スレッドの開始
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
@@ -1023,7 +1051,12 @@ class YOLOOptimizer:
         # ロボット制御用スレッドの停止
         if hasattr(self, 'command_thread') and self.command_thread and self.command_thread.is_alive():
              self.command_thread.join(timeout=1)
-             
+        
+        # Watchdogの停止
+        if self.watchdog_thread and self.watchdog_thread.is_alive():
+            self.watchdog_thread.join(timeout=1)
+        self.watchdog_thread = None
+
         self.thread = None
         self.command_thread = None
 

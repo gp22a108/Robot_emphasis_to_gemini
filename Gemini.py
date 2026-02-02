@@ -355,6 +355,7 @@ class AudioLoop:
         finally:
             self._mark_playback_end()
 
+
         # 3. Wait for session to be ready
         print("[Gemini] Audio finished. Waiting for session to be ready...")
         connect_timeout = float(getattr(config, "SESSION_CONNECT_TIMEOUT_SECONDS", 30))
