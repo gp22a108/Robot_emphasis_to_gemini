@@ -428,15 +428,38 @@ class AudioLoop:
                 traceback.print_exc()
 
     def _ensure_yolo_running(self):
-        """Ensure YOLO thread is alive while waiting for detection."""
+        """Ensure YOLO thread is alive and responsive while waiting for detection."""
         if not self.yolo_detector:
             return
+        
+        # 1. スレッドオブジェクトが存在し、is_alive() が True か
         thread_alive = self.yolo_detector.thread and self.yolo_detector.thread.is_alive()
-        if thread_alive:
+        
+        # 2. フレームが更新されているか (30秒以上更新がなければフリーズとみなす)
+        is_stale = False
+        if self.yolo_detector.last_frame_time > 0: # 初回起動時は0なのでチェックしない
+            last_frame_age = time.time() - self.yolo_detector.last_frame_time
+            if last_frame_age > 30.0:
+                is_stale = True
+        
+        # 正常な場合: スレッドが生きていて、フリーズしていない
+        if thread_alive and not is_stale:
             return
-        Logger.log_system_error("YOLO watchdog", message="YOLO thread not alive, restarting")
-        print("[Gemini Error] YOLO thread is not running! Attempting to restart...")
-        self.yolo_detector.start()
+
+        # 異常な場合: 再起動を試みる
+        if not thread_alive:
+            message = "YOLO thread is not alive. Restarting..."
+        else: # is_stale is True
+            message = f"YOLO thread seems stale (last frame {last_frame_age:.1f}s ago). Restarting..."
+
+        Logger.log_system_error("YOLO watchdog (Gemini)", message=message)
+        print(f"[Gemini Error] {message}")
+        
+        try:
+            self.yolo_detector.restart()
+        except Exception as e:
+            Logger.log_system_error("YOLO restart from Gemini", e)
+            print(f"[Gemini Error] Failed to restart YOLO: {e}")
 
     async def _wait_for_detection(self):
         """Wait for detection trigger while periodically checking YOLO health."""

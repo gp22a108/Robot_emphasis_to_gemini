@@ -802,22 +802,27 @@ class YOLOOptimizer:
         Logger.log_system_event("INFO", "YOLO Watchdog", message="Started")
         print("[YOLO] Watchdog started.")
         while not self.stop_event.is_set():
-            time.sleep(5)
-            if self.pause_event.is_set():
-                self.last_loop_time = time.time() # Prevent timeout during pause
-                continue
-            
-            elapsed = time.time() - self.last_loop_time
-            if elapsed > 30.0: # 30秒以上更新がない
-                msg = f"YOLO thread stalled for {elapsed:.1f}s (FPS: {self.fps:.1f})"
-                print(f"[YOLO Watchdog] {msg}")
-                Logger.log_system_error("YOLO Watchdog", message=msg)
+            try:
+                time.sleep(5)
+                if self.pause_event.is_set():
+                    self.last_loop_time = time.time() # Prevent timeout during pause
+                    continue
                 
-                # 自動再起動を試みる
-                print("[YOLO Watchdog] Attempting to restart YOLO thread...")
-                self.restart()
-                # 再起動後はループを抜ける（新しいWatchdogが起動されるため）
-                break
+                elapsed = time.time() - self.last_loop_time
+                if elapsed > 30.0: # 30秒以上更新がない
+                    msg = f"YOLO thread stalled for {elapsed:.1f}s (FPS: {self.fps:.1f})"
+                    print(f"[YOLO Watchdog] {msg}")
+                    Logger.log_system_error("YOLO Watchdog", message=msg)
+                    
+                    # 自動再起動を試みる
+                    print("[YOLO Watchdog] Attempting to restart YOLO thread...")
+                    self.restart()
+                    # 再起動後はループを抜ける（新しいWatchdogが起動されるため）
+                    break
+            except Exception as e:
+                Logger.log_system_error("YOLO Watchdog Error", e)
+                print(f"[YOLO Watchdog] Error: {e}")
+                time.sleep(5) # エラー発生時は少し待つ
 
     def run(self, source=None):
         show_window = False
