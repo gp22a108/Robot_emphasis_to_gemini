@@ -329,6 +329,13 @@ class AudioLoop:
             Logger.log_system_error("起動音再生", e, message=f"path={wav_path}")
             print(f"[Gemini] WAV再生に失敗しました: {e}")
             traceback.print_exc()
+        finally:
+            # 再生終了を確実にマークする
+            # _play_first_wav は別スレッドで実行されるため、ここで直接 _mark_playback_end を呼ぶのは不適切かもしれないが、
+            # 呼び出し元で finally ブロックで呼ばれているので、ここでは何もしないか、
+            # あるいは呼び出し元の構造に依存する。
+            # 現状のコードでは呼び出し元（_on_detected）の finally ブロックで _mark_playback_end() が呼ばれているのでOK。
+            pass
 
     async def _on_detected(self):
         """検出時の非同期処理"""
@@ -349,10 +356,16 @@ class AudioLoop:
         self.session_active.set()
 
         # 2. Play audio concurrently (Blocking in thread)
+        # 再生開始をマーク
         self._mark_playback_start()
         try:
+            # asyncio.to_thread で実行することで、メインループをブロックせずに再生
             await asyncio.to_thread(self._play_first_wav)
+        except Exception as e:
+            Logger.log_system_error("音声再生タスク", e)
+            print(f"[Gemini] 音声再生タスクでエラーが発生しました: {e}")
         finally:
+            # 再生終了をマーク（成功・失敗に関わらず）
             self._mark_playback_end()
 
 
