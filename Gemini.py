@@ -182,7 +182,7 @@ class AudioLoop:
         
         「間違いない！」
         
-        「えぐい、えぐい！」
+        「えぐい, えぐい！」
         
         「カッケェ……（小声で）」
         
@@ -238,7 +238,7 @@ class AudioLoop:
 
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
-        self.max_consecutive_failures = 10  # 連続失敗の上限
+        self.max_consecutive_failures = 5  # 連続失敗の上限を5回に変更
         self.last_connection_attempt_time = 0.0
 
     @staticmethod
@@ -835,7 +835,7 @@ class AudioLoop:
                         if not config.USE_VOICEVOX and audio_out_stream and audio_data:
                             await asyncio.to_thread(audio_out_stream.write, audio_data)
                         
-                        if server_content and getattr(server_content, "generation_complete", False): #geminiから生成される音声を使用したフラグ判定を行いたい場合は、turn_completeを使う。
+                        if server_content and getattr(server_content, "turn_complete", False): #geminiから生成される音声を使用したフラグ判定を行いたい場合は、turn_completeを使う。
                             break
 
                     # --- TURN IS COMPLETE ---
@@ -1296,7 +1296,7 @@ class AudioLoop:
                                 print("[Gemini] No resumption handle yet. Starting a new session.")
 
                             # 連続失敗が多い場合は完全にリセット
-                            if self.consecutive_connection_failures >= 3:
+                            if self.consecutive_connection_failures >= 5: # 3から5に変更
                                 print(f"[Gemini] Too many consecutive failures ({self.consecutive_connection_failures}). Resetting session.")
                                 Logger.log_system_error(
                                     "Gemini connection failure limit",
