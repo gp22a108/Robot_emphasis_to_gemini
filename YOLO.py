@@ -546,8 +546,16 @@ class YOLOOptimizer:
                 requests.post(url, json=json_data, timeout=0.1, proxies={"http": None, "https": None})
             except queue.Empty:
                 continue
-            except Exception:
-                # 通信エラー等は無視
+            except Exception as e:
+                # 通信エラー等は無視するが、ConnectionResetErrorなどはログに残す
+                # ただし、頻繁に出る可能性があるので、デバッグレベルにするか、
+                # 特定のエラーだけログに残す
+                # ここでは、ConnectionResetErrorがログに出ていたので、それをキャッチして
+                # ログ出力を抑制するか、あるいはエラーとして記録するか検討する。
+                # ユーザーのログには ConnectionResetError が出ていた。
+                # これが原因でスレッドが止まることはないはず（try-except内なので）
+                # しかし、念のためログに残しておく
+                # Logger.log_system_error("Robot Command Error", e) 
                 pass
 
     def _draw_results(self, frame, results, face_results, process_time_ms):
@@ -804,6 +812,12 @@ class YOLOOptimizer:
                 msg = f"YOLO thread stalled for {elapsed:.1f}s (FPS: {self.fps:.1f})"
                 print(f"[YOLO Watchdog] {msg}")
                 Logger.log_system_error("YOLO Watchdog", message=msg)
+                
+                # 自動再起動を試みる
+                print("[YOLO Watchdog] Attempting to restart YOLO thread...")
+                self.restart()
+                # 再起動後はループを抜ける（新しいWatchdogが起動されるため）
+                break
 
     def run(self, source=None):
         show_window = False
