@@ -155,20 +155,25 @@ class YOLOOptimizer:
         """依存ライブラリとモデルの初期化（別スレッドで実行）"""
         global cv2, np, ov, PrePostProcessor, ResizeAlgorithm, ColorFormat, psutil, YOLO
         
-        if cv2 is not None:
+        self.last_loop_time = time.time() # Watchdog reset
+
+        # 既に初期化済みならスキップ
+        if self.core is not None:
             return
 
         print("[YOLO] ライブラリを読み込んでいます...")
         t_start = time.perf_counter()
         
-        import cv2
-        import numpy as np
-        import openvino as ov
-        from openvino.preprocess import PrePostProcessor, ResizeAlgorithm, ColorFormat
-        import psutil
-        from ultralytics import YOLO
+        if cv2 is None:
+            import cv2
+            import numpy as np
+            import openvino as ov
+            from openvino.preprocess import PrePostProcessor, ResizeAlgorithm, ColorFormat
+            import psutil
+            from ultralytics import YOLO
         
         print(f"[YOLO] ライブラリ読み込み完了: {time.perf_counter() - t_start:.3f}s")
+        self.last_loop_time = time.time() # Watchdog reset
 
         # --- 計測の準備 ---
         p = psutil.Process()
@@ -180,6 +185,7 @@ class YOLOOptimizer:
         print("[YOLO] OpenVINO Runtimeを起動中...")
         self.core = ov.Core()
         last_time, last_cpu = measure_and_print("OpenVINO Runtime起動", last_time, last_cpu, p)
+        self.last_loop_time = time.time() # Watchdog reset
 
         cache_path = Path(self.cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
@@ -200,13 +206,16 @@ class YOLOOptimizer:
         print(f"[YOLO] モデルを読み込んでいます: {self.model_path}")
         self.model = self.core.read_model(self.model_path)
         last_time, last_cpu = measure_and_print("モデル読み込み", last_time, last_cpu, p)
+        self.last_loop_time = time.time() # Watchdog reset
 
         self._setup_preprocessing(self.model)
         last_time, last_cpu = measure_and_print("前処理プロセス統合", last_time, last_cpu, p)
+        self.last_loop_time = time.time() # Watchdog reset
 
         print(f"[YOLO] モデルをデバイス({self.device_name})向けにコンパイル中...")
         self.compiled_model = self.core.compile_model(self.model, self.device_name)
         last_time, last_cpu = measure_and_print("モデルコンパイル", last_time, last_cpu, p)
+        self.last_loop_time = time.time() # Watchdog reset
 
         self.infer_queue = ov.AsyncInferQueue(self.compiled_model, jobs=0)
         self.infer_queue.set_callback(self._completion_callback)
@@ -219,9 +228,11 @@ class YOLOOptimizer:
             if os.path.exists(self.face_model_path):
                 print(f"[YOLO] 顔検出モデルをOpenVINO形式に変換しています: {self.face_model_path}")
                 try:
+                    self.last_loop_time = time.time() # Watchdog reset
                     model = YOLO(self.face_model_path)
                     model.export(format='openvino', half=True) # FP16でエクスポート
                     print("[YOLO] 変換完了")
+                    self.last_loop_time = time.time() # Watchdog reset
                 except Exception as e:
                     print(f"[YOLO] 顔検出モデルの変換に失敗: {e}")
             else:
@@ -232,18 +243,21 @@ class YOLOOptimizer:
                 print(f"[YOLO] 顔検出モデル(OpenVINO)を読み込んでいます: {face_xml_path}")
                 self.face_net = self.core.read_model(face_xml_path)
                 self._setup_preprocessing(self.face_net) # 同じ前処理を適用
+                self.last_loop_time = time.time() # Watchdog reset
                 
                 print(f"[YOLO] 顔検出モデルをデバイス({self.device_name})向けにコンパイル中...")
                 self.compiled_face_model = self.core.compile_model(self.face_net, self.device_name)
                 self.face_infer_queue = ov.AsyncInferQueue(self.compiled_face_model, jobs=0)
                 self.face_infer_queue.set_callback(self._face_completion_callback)
                 print("[YOLO] 顔検出モデルの初期化完了")
+                self.last_loop_time = time.time() # Watchdog reset
             except Exception as e:
                 print(f"[YOLO] 顔検出モデル(OpenVINO)の初期化に失敗: {e}")
                 traceback.print_exc()
         
         measure_and_print("初期化全体", total_start_time, total_start_cpu, p)
         self.is_ready_event.set() # 初期化完了を通知
+        self.last_loop_time = time.time() # Watchdog reset
 
     def _setup_preprocessing(self, model):
         ppp = PrePostProcessor(model)
@@ -318,11 +332,13 @@ class YOLOOptimizer:
         backoff = float(getattr(config, "CAMERA_RECONNECT_BACKOFF", 1.5))
         attempt = 0
         while not self.stop_event.is_set():
+            self.last_loop_time = time.time() # Update watchdog
             attempt += 1
             delay = min(max_delay, base_delay * (backoff ** (attempt - 1)))
             print(f"[YOLO] Camera reconnect attempt {attempt}, waiting {delay:.1f}s...")
             Logger.log_system_event("INFO", "YOLO camera reconnect", message=f"attempt={attempt}, delay={delay:.1f}s")
             time.sleep(delay)
+            self.last_loop_time = time.time() # Update watchdog
             cap = self._open_camera(source)
             if cap:
                 print("[YOLO] Camera reconnected.")
@@ -773,7 +789,10 @@ class YOLOOptimizer:
     def run(self, source=None):
         show_window = False
         try:
+            self.last_loop_time = time.time() # Update start time
             self._initialize_dependencies()
+            self.last_loop_time = time.time() # Update after init
+
             if source is None:
                 source = config.VIDEO_SOURCE
 
@@ -789,11 +808,14 @@ class YOLOOptimizer:
                     Logger.log_system_event("INFO", "YOLO viewer", message="OpenCV window allowed in worker thread")
 
             cap = self._open_camera(source)
+            self.last_loop_time = time.time() # Update after camera open
+
             if not cap:
                 if self._should_reconnect_source(source):
                     print("[YOLO] Camera open failed. Attempting to reconnect...")
                     Logger.log_system_event("INFO", "YOLO camera reconnect", message="Initial open failed, starting reconnect loop")
                     cap = self._reconnect_camera(source)
+                    self.last_loop_time = time.time() # Update after reconnect
                 if not cap:
                     print("[エラー] カメラを開けませんでした。")
                     return
@@ -856,6 +878,7 @@ class YOLOOptimizer:
                             except Exception:
                                 pass
                             cap = self._reconnect_camera(source)
+                            self.last_loop_time = time.time() # Update after reconnect
                             if cap:
                                 continue
                         break
