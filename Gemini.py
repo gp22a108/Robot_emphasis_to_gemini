@@ -387,8 +387,21 @@ class AudioLoop:
             except asyncio.CancelledError:
                 pass
         if not done:
-            print("[Gemini] Session ready wait timed out. Keeping mic muted.")
+            print("[Gemini] Session ready wait timed out. Resetting session...")
+            Logger.log_system_error("Gemini session ready timeout", message="Session ready wait timed out")
+            self.session_failed.set()
+            self.session_active.clear()
+            self.detection_triggered = False
+            self.mic_is_active.clear()
+            self._clear_session_resumption()
+            if self.audio_stream:
+                self.audio_stream.close()
+                self.audio_stream = None
+            
+            # YOLOの状態をリセットして次の検出を待つ
+            self._reset_detection_state()
             return
+
         if self.session_failed.is_set() or not self.session_active.is_set():
             print("[Gemini] Session failed to start. Keeping mic muted.")
             return
@@ -1333,7 +1346,7 @@ class AudioLoop:
                                 print("[Gemini] No resumption handle yet. Starting a new session.")
 
                             # 連続失敗が多い場合は完全にリセット
-                            if self.consecutive_connection_failures >= 5: # 3から5に変更
+                            if self.consecutive_connection_failures >= 3: # 5から3に変更
                                 print(f"[Gemini] Too many consecutive failures ({self.consecutive_connection_failures}). Resetting session.")
                                 Logger.log_system_error(
                                     "Gemini connection failure limit",
