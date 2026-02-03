@@ -687,7 +687,13 @@ class YOLOOptimizer:
             if label == 'person' and h > PERSON_HEIGHT_THRESHOLD:
                 self.last_large_person_time = current_time
                 # 通知済みフラグをチェック
-                if not self.has_notified_in_session:
+                # ロックを使ってフラグをチェック
+                should_notify = False
+                with self.lock:
+                    if not self.has_notified_in_session:
+                        should_notify = True
+                
+                if should_notify:
                     if (current_time - self.last_detection_time) > config.DETECTION_INTERVAL:
                         print(f" >> 通知: 大きな人物を検出しました (高さ: {h}px)")
 
@@ -702,6 +708,10 @@ class YOLOOptimizer:
                                 # コールバックが False を返したら時間を更新しない（Gemini準備中など）
                                 if self.on_detection() is False:
                                     should_update_time = False
+                                else:
+                                    # 通知成功時、フラグを立てる
+                                    with self.lock:
+                                        self.has_notified_in_session = True
                             except Exception as e:
                                 Logger.log_system_error("YOLO on_detection callback", e)
                                 print(f"[YOLO Error] on_detection callback failed: {e}")
