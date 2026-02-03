@@ -1043,6 +1043,11 @@ class YOLOOptimizer:
             return
 
         self.stop_event.clear()
+        
+        # ここに追加
+        with self.lock:
+            self.has_notified_in_session = False
+            self.pending_notification_reset = False
 
         # ロボット制御用スレッドの開始
         if not self.command_thread or not self.command_thread.is_alive():
