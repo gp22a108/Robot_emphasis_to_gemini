@@ -956,9 +956,6 @@ class AudioLoop:
                             Logger.log_system_error("player.close()", e)
                             print(f"[Gemini] Player close error: {e}")
 
-                    if self.resume_trigger:
-                        should_resume_mic = True
-
                     if self.reset_trigger:
                         should_resume_mic = False
 
