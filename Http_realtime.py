@@ -57,8 +57,16 @@ class PoseRequestHandler(BaseHTTPRequestHandler):
                         ids = list(current_pose.keys())
                         positions = list(current_pose.values())
 
+                    # Noneチェックを追加
+                    safe_positions = []
+                    for p in positions:
+                        if p is None:
+                            safe_positions.append(0) # Noneの場合は0に置換
+                        else:
+                            safe_positions.append(p)
+
                     line1 = ",".join(ids)
-                    line2 = ",".join(map(str, positions))
+                    line2 = ",".join(map(str, safe_positions))
                     current_data_str = f"{line1}\n{line2}"
 
                     # データに変更があった場合のみ送信
