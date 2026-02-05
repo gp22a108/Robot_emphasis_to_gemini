@@ -737,6 +737,14 @@ class YOLOOptimizer:
                 Logger.log_system_error("YOLO pending_notification_reset", e)
                 print(f"[YOLO Error] Failed to reset pending notification: {e}")
 
+        # Safety net for Low FPS mode
+        # GeminiがクラッシュしてLow FPSモードが解除されなかった場合の対策
+        if self.low_fps_mode and (current_time - self.last_detection_time > 60.0):
+             print("[YOLO] Low FPS mode stuck? Forcing reset.")
+             Logger.log_system_event("WARNING", "YOLO safety net", message="Forcing Low FPS mode OFF and resetting notification flag")
+             self.set_low_fps_mode(False)
+             self.reset_notification_flag()
+
         # ロボット追跡コマンドの送信
         if closest_person_cx is not None:
             width = frame.shape[1]

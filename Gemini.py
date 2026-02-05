@@ -33,6 +33,7 @@ import io
 import requests
 import signal
 import atexit
+import os
 
 # 設定ファイル
 import config
@@ -608,8 +609,20 @@ class AudioLoop:
         print("[Gemini] Timeout monitor started.")
         session_start_time = time.time()
         timeout_seconds = getattr(config, "SESSION_TIMEOUT_SECONDS", 30)
+        max_duration = getattr(config, "MAX_SESSION_DURATION_SECONDS", 600) # デフォルト10分
+
         while True:
             await asyncio.sleep(1.0)
+            current_time = time.time()
+            
+            # 最大セッション継続時間のチェック
+            if max_duration and (current_time - session_start_time > max_duration):
+                print(f"[Gemini] Max session duration ({max_duration}s) reached. Resetting session.")
+                Logger.log_interaction_result(f"セッション最大時間到達（{max_duration}秒）")
+                Logger.log_system_event("INFO", "Gemini timeout", message=f"Raising SessionResetException after max duration")
+                self.reset_trigger = True
+                raise SessionResetException()
+
             if self.yolo_detector:
                 last_seen = self.yolo_detector.last_person_seen_time
                 
@@ -618,7 +631,7 @@ class AudioLoop:
                     continue
 
                 # 30秒以上人が検出されていない場合
-                if time.time() - last_seen > timeout_seconds:
+                if current_time - last_seen > timeout_seconds:
                     if self.playback_active.is_set():
                         print("[Gemini] Timeout reached but playback active. Waiting for playback to finish...")
                         while self.playback_active.is_set():
@@ -1041,7 +1054,23 @@ class AudioLoop:
         
         print(f"[Gemini] GenAI インポート完了: {time.perf_counter() - t_start_import:.3f}s")
 
-        client = genai.Client(http_options={"api_version": "v1beta"})
+        # プロキシ設定の読み込み
+        http_options = {"api_version": "v1beta"}
+        
+        # config.py からプロキシ設定を取得
+        http_proxy = getattr(config, "HTTP_PROXY", None)
+        https_proxy = getattr(config, "HTTPS_PROXY", None)
+        
+        # 環境変数にも設定（念のため）
+        if http_proxy:
+            os.environ["HTTP_PROXY"] = http_proxy
+            os.environ["http_proxy"] = http_proxy
+        if https_proxy:
+            os.environ["HTTPS_PROXY"] = https_proxy
+            os.environ["https_proxy"] = https_proxy
+            
+        # クライアント初期化
+        client = genai.Client(http_options=http_options)
 
         self.loop = asyncio.get_running_loop()
         t0 = time.perf_counter()

@@ -32,6 +32,10 @@ DETECTION_INTERVAL = 1.0
 # 人物が検出されなくなってからセッションを終了するまでの時間 (秒)
 # 5秒
 SESSION_TIMEOUT_SECONDS = 5
+# セッションの最大継続時間 (秒)。これを過ぎると強制的にセッションを終了し、再接続待ちになります。
+# 長時間接続によるGemini側のタイムアウトや不具合を回避するために使用します。
+# 0 または None で無効化
+MAX_SESSION_DURATION_SECONDS = 600
 # Session connect timeout (seconds)
 SESSION_CONNECT_TIMEOUT_SECONDS = 30
 # Retry wait after connect error (seconds)
@@ -88,6 +92,12 @@ MAX_WORKERS = 1
 # 値を小さくすると、発話終了の判定が早くなります（キレが良い）。
 # 値を大きくすると、発話終了の判定が遅くなります（間を許容する）。
 SPEECH_SILENCE_DURATION_MS = 200
+
+# --- ネットワーク設定 ---
+# プロキシ設定 (None または "http://proxy.example.com:8080")
+# 認証が必要な場合: "http://user:password@proxy.example.com:8080"
+HTTP_PROXY = None
+HTTPS_PROXY = None
 
 # --- YOLO表示/カメラ再接続設定 ---
 # OpenCVの表示ウィンドウを使う場合は True
