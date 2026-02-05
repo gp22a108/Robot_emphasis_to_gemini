@@ -34,6 +34,7 @@ import requests
 import signal
 import atexit
 import os
+import sys
 
 # 設定ファイル
 import config
@@ -955,6 +956,9 @@ class AudioLoop:
                             Logger.log_system_error("player.close()", e)
                             print(f"[Gemini] Player close error: {e}")
 
+                    if self.resume_trigger:
+                        should_resume_mic = True
+
                     if self.reset_trigger:
                         should_resume_mic = False
 
@@ -1351,12 +1355,12 @@ def handle_termination(signum=None, frame=None):
     import sys
     sys.stdout.flush()
     sys.stderr.flush()
+    sys.exit(0)
 
 if __name__ == "__main__":
     import os
 
     # 終了ハンドラーを登録
-    atexit.register(handle_termination)
     signal.signal(signal.SIGTERM, handle_termination)
     signal.signal(signal.SIGINT, handle_termination)
     if hasattr(signal, 'SIGBREAK'):  # Windows
