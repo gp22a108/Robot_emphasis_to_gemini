@@ -233,6 +233,8 @@ class AudioLoop:
         self._detection_lock = asyncio.Lock()
         self.session_starting = asyncio.Event()
         self.retry_pending = False
+        self.retry_pending_until = 0.0
+        self._last_issue_notify_time = 0.0
         
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
@@ -332,6 +334,41 @@ class AudioLoop:
                 self.yolo_detector.last_detection_time = 0
             if reset_detection:
                 self._reset_detection_state()
+
+    @staticmethod
+    def _mask_proxy_value(value: str | None) -> str:
+        if not value:
+            return "None"
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(value)
+            host = parsed.hostname or "unknown-host"
+            port = f":{parsed.port}" if parsed.port else ""
+            scheme = parsed.scheme or "proxy"
+            return f"{scheme}://{host}{port}"
+        except Exception:
+            return "configured"
+
+    def _notify_runtime_issue(self, message: str):
+        now = time.time()
+        min_interval = float(getattr(config, "ERROR_NOTIFY_INTERVAL_SECONDS", 10))
+        if now - self._last_issue_notify_time < min_interval:
+            return
+        self._last_issue_notify_time = now
+        print(f"[Gemini ALERT] {message}")
+        Logger.log_interaction_result(f"エラー通知: {message}")
+        if self.yolo_detector:
+            try:
+                self.yolo_detector.set_voicevox_message(message)
+            except Exception:
+                pass
+
+    def _clear_runtime_issue(self):
+        if self.yolo_detector:
+            try:
+                self.yolo_detector.set_voicevox_message("")
+            except Exception:
+                pass
 
     def _play_first_wav(self):
         import wave
@@ -1097,18 +1134,46 @@ class AudioLoop:
 
         # プロキシ設定の読み込み
         http_options = {"api_version": "v1beta"}
-        
+
         # config.py からプロキシ設定を取得
+        proxy_mode = str(getattr(config, "GEMINI_PROXY_MODE", "auto")).strip().lower()
         http_proxy = getattr(config, "HTTP_PROXY", None)
         https_proxy = getattr(config, "HTTPS_PROXY", None)
-        
-        # 環境変数にも設定（念のため）
-        if http_proxy:
-            os.environ["HTTP_PROXY"] = http_proxy
-            os.environ["http_proxy"] = http_proxy
-        if https_proxy:
-            os.environ["HTTPS_PROXY"] = https_proxy
-            os.environ["https_proxy"] = https_proxy
+
+        if proxy_mode == "disable":
+            for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+                os.environ.pop(key, None)
+        elif proxy_mode == "force":
+            if http_proxy:
+                os.environ["HTTP_PROXY"] = http_proxy
+                os.environ["http_proxy"] = http_proxy
+            else:
+                os.environ.pop("HTTP_PROXY", None)
+                os.environ.pop("http_proxy", None)
+            if https_proxy:
+                os.environ["HTTPS_PROXY"] = https_proxy
+                os.environ["https_proxy"] = https_proxy
+            else:
+                os.environ.pop("HTTPS_PROXY", None)
+                os.environ.pop("https_proxy", None)
+        else:
+            # auto: config値があれば上書き、なければ既存環境変数をそのまま使う
+            if http_proxy:
+                os.environ["HTTP_PROXY"] = http_proxy
+                os.environ["http_proxy"] = http_proxy
+            if https_proxy:
+                os.environ["HTTPS_PROXY"] = https_proxy
+                os.environ["https_proxy"] = https_proxy
+
+        Logger.log_system_event(
+            "INFO",
+            "Gemini proxy",
+            message=(
+                f"mode={proxy_mode}; "
+                f"http={self._mask_proxy_value(os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy'))}; "
+                f"https={self._mask_proxy_value(os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy'))}"
+            ),
+        )
             
         # クライアント初期化
         client = genai.Client(http_options=http_options)
@@ -1264,7 +1329,15 @@ class AudioLoop:
                     message=f"Loop iteration #{session_loop_count}, consecutive_failures={self.consecutive_connection_failures}")
 
                 retry_presence_window = float(getattr(config, "RETRY_SESSION_PRESENCE_WINDOW_SECONDS", 5))
-                if self.retry_pending and self._person_visible_recently(retry_presence_window):
+                retry_without_detection_seconds = float(getattr(config, "RETRY_WITHOUT_DETECTION_SECONDS", 30))
+                retry_window_valid = (
+                    self.retry_pending_until > 0.0 and (time.time() <= self.retry_pending_until)
+                )
+                should_retry_without_detection = self.retry_pending and (
+                    retry_window_valid
+                    or self._person_visible_recently(retry_presence_window)
+                )
+                if should_retry_without_detection:
                     print("[Gemini] Retrying session connection without replay (person still present).")
                     Logger.log_system_event(
                         "INFO",
@@ -1272,10 +1345,12 @@ class AudioLoop:
                         message="Retrying session connection without new detection",
                     )
                     self.retry_pending = False
+                    self.retry_pending_until = 0.0
                     self.session_active.set()
                     self.session_failed.clear()
                 else:
                     self.retry_pending = False
+                    self.retry_pending_until = 0.0
                     # セッション開始待機 (常に新規セッション)
                     print("[Gemini] Waiting for person detection to start NEW session...")
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
@@ -1340,6 +1415,7 @@ class AudioLoop:
 
                     # 接続成功 - カウンターをリセット
                     self.consecutive_connection_failures = 0
+                    self._clear_runtime_issue()
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Session connected successfully")
                     break # Normal exit
 
@@ -1348,6 +1424,7 @@ class AudioLoop:
                     print("[Gemini] Session ended. Returning to detection wait state.")
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Session reset exception caught, returning to detection wait")
                     self.retry_pending = False
+                    self.retry_pending_until = 0.0
                     await self._shutdown_session("session reset exception", reset_detection=False)
                     print("[Gemini] Calling _reset_detection_state...")
                     # YOLOの通知フラグをリセット（次の人物検出を可能にする）
@@ -1362,6 +1439,7 @@ class AudioLoop:
                         print("[Gemini] Session ended. Returning to detection wait state.")
                         Logger.log_system_event("INFO", "Gemini lifecycle", message=f"Reset exception in group ({type(e).__name__}), returning to detection wait")
                         self.retry_pending = False
+                        self.retry_pending_until = 0.0
                         await self._shutdown_session("session reset exception group", reset_detection=False)
                         print("[Gemini] Calling _reset_detection_state...")
                         # YOLOの通知フラグをリセット（次の人物検出を可能にする）
@@ -1400,6 +1478,8 @@ class AudioLoop:
                                     mark_failed=True,
                                     mark_reset=False,
                                 )
+                                self.retry_pending = False
+                                self.retry_pending_until = 0.0
                                 await asyncio.sleep(1)
                                 continue
 
@@ -1409,6 +1489,11 @@ class AudioLoop:
                             mark_reset=False,
                         )
                         self.retry_pending = True
+                        self.retry_pending_until = time.time() + retry_without_detection_seconds
+                        self._notify_runtime_issue(
+                            "Gemini接続エラーで再接続中です。"
+                            "プロキシ環境なら config.py の GEMINI_PROXY_MODE / HTTP_PROXY / HTTPS_PROXY を確認してください。"
+                        )
                         Logger.log_system_error(
                             "Gemini connection retry",
                             e,

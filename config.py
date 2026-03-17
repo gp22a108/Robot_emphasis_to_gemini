@@ -38,12 +38,24 @@ SESSION_CONNECT_TIMEOUT_SECONDS = 30
 SESSION_START_PRESENCE_WINDOW_SECONDS = 1.5
 # 接続エラー時に再検知なしで再接続を試す人物在席猶予
 RETRY_SESSION_PRESENCE_WINDOW_SECONDS = 5
+# 接続失敗時に再検知なしで再接続を継続する最大時間
+RETRY_WITHOUT_DETECTION_SECONDS = 30
 # セッション終了時のクローズ待機タイムアウト
 SESSION_CLOSE_TIMEOUT_SECONDS = 3
 # 最大セッション継続時間 (秒)。0で無効
 MAX_SESSION_DURATION_SECONDS = 0
 # Retry wait after connect error (seconds)
 CONNECT_RETRY_WAIT_SECONDS = 5
+# エラー通知の最小間隔（秒）
+ERROR_NOTIFY_INTERVAL_SECONDS = 10
+
+# --- Gemini Proxy設定 ---
+# auto: 環境変数を使用（config指定があれば上書き）
+# force: 下記HTTP_PROXY/HTTPS_PROXYを必ず使用
+# disable: Gemini接続でプロキシを使わない
+GEMINI_PROXY_MODE = "auto"
+HTTP_PROXY = None
+HTTPS_PROXY = None
 # Session resumption settings (完全終了モード: 常に新規セッション開始)
 SESSION_RESUMPTION_ENABLED = False
 SESSION_RESUMPTION_TRANSPARENT = False
