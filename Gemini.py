@@ -408,6 +408,13 @@ class AudioLoop:
     async def _on_detected(self):
         """検出時の非同期処理"""
         async with self._detection_lock:
+            if self.retry_pending:
+                Logger.log_system_event(
+                    "INFO",
+                    "Gemini lifecycle",
+                    message="Detection ignored while retrying session connection",
+                )
+                return
             # 既にセッション開始処理中/アクティブなら何もしない
             if self.session_active.is_set() or self.session_starting.is_set():
                 return
