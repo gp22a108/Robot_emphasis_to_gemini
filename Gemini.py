@@ -349,6 +349,18 @@ class AudioLoop:
         except Exception:
             return "configured"
 
+    @staticmethod
+    def _normalize_proxy_value(value: str | None) -> str | None:
+        if value is None:
+            return None
+        v = str(value).strip()
+        if not v:
+            return None
+        if "://" not in v:
+            # プロキシ指定は URL 形式必須（例: http://proxy.example:8080）
+            v = f"http://{v}"
+        return v
+
     def _notify_runtime_issue(self, message: str):
         now = time.time()
         min_interval = float(getattr(config, "ERROR_NOTIFY_INTERVAL_SECONDS", 10))
@@ -1135,8 +1147,28 @@ class AudioLoop:
 
         # config.py からプロキシ設定を取得
         proxy_mode = str(getattr(config, "GEMINI_PROXY_MODE", "auto")).strip().lower()
-        http_proxy = getattr(config, "HTTP_PROXY", None)
-        https_proxy = getattr(config, "HTTPS_PROXY", None)
+        raw_http_proxy = getattr(config, "HTTP_PROXY", None)
+        raw_https_proxy = getattr(config, "HTTPS_PROXY", None)
+        http_proxy = self._normalize_proxy_value(raw_http_proxy)
+        https_proxy = self._normalize_proxy_value(raw_https_proxy)
+        if raw_http_proxy and http_proxy != str(raw_http_proxy).strip():
+            Logger.log_system_event(
+                "INFO",
+                "Gemini proxy",
+                message=f"HTTP_PROXY normalized: {self._mask_proxy_value(http_proxy)}",
+            )
+        if raw_https_proxy and https_proxy != str(raw_https_proxy).strip():
+            Logger.log_system_event(
+                "INFO",
+                "Gemini proxy",
+                message=f"HTTPS_PROXY normalized: {self._mask_proxy_value(https_proxy)}",
+            )
+
+        # 片方のみ指定されている場合は両方に適用（wss接続でHTTPS_PROXYが必要なため）
+        if http_proxy and not https_proxy:
+            https_proxy = http_proxy
+        if https_proxy and not http_proxy:
+            http_proxy = https_proxy
 
         if proxy_mode == "disable":
             for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):

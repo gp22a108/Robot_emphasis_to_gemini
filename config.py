@@ -56,8 +56,8 @@ ERROR_NOTIFY_INTERVAL_SECONDS = 10
 # force: 下記HTTP_PROXY/HTTPS_PROXYを必ず使用
 # disable: Gemini接続でプロキシを使わない
 GEMINI_PROXY_MODE = "auto"
-HTTP_PROXY = "wwwproxy.osakac.ac.jp"
-HTTPS_PROXY = "wwwproxy.osakac.ac.jp"
+HTTP_PROXY = "wwwproxy.osakac.ac.jp:8080"
+HTTPS_PROXY = "wwwproxy.osakac.ac.jp:8080"
 # Session resumption settings (完全終了モード: 常に新規セッション開始)
 SESSION_RESUMPTION_ENABLED = False
 SESSION_RESUMPTION_TRANSPARENT = False
