@@ -34,6 +34,12 @@ DETECTION_INTERVAL = 1.0
 SESSION_TIMEOUT_SECONDS = 5
 # Session connect timeout (seconds)
 SESSION_CONNECT_TIMEOUT_SECONDS = 30
+# Intro音声再生後、この秒数以内に人物が見えていればセッション開始
+SESSION_START_PRESENCE_WINDOW_SECONDS = 1.5
+# セッション終了時のクローズ待機タイムアウト
+SESSION_CLOSE_TIMEOUT_SECONDS = 3
+# 最大セッション継続時間 (秒)。0で無効
+MAX_SESSION_DURATION_SECONDS = 0
 # Retry wait after connect error (seconds)
 CONNECT_RETRY_WAIT_SECONDS = 5
 # Session resumption settings (完全終了モード: 常に新規セッション開始)
