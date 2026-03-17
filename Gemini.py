@@ -679,7 +679,24 @@ class AudioLoop:
 
         try:
             while True:
-                data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+                stream = self.audio_stream
+                if stream is None:
+                    # セッション終了中に別タスクが close した場合は静かに終了する
+                    if not self.session_active.is_set():
+                        break
+                    await asyncio.sleep(0.05)
+                    continue
+
+                try:
+                    data = await asyncio.to_thread(stream.read, CHUNK_SIZE, **kwargs)
+                except Exception as e:
+                    # シャットダウン競合時はエラー扱いせず抜ける
+                    if self.audio_stream is None or not self.session_active.is_set():
+                        break
+                    Logger.log_system_error("listen_audio read", e)
+                    await asyncio.sleep(0.05)
+                    continue
+
                 if self.mic_is_active.is_set():
                     try:
                         # タイムアウト付きでputを実行 (Queue溢れ対策)
