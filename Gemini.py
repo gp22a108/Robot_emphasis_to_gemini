@@ -238,7 +238,7 @@ class AudioLoop:
         
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
-        self.max_consecutive_failures = 5  # 連続失敗の上限を5回に変更
+        self.max_consecutive_failures = int(getattr(config, "MAX_CONSECUTIVE_CONNECT_FAILURES", 0) or 0)
         self.last_connection_attempt_time = 0.0
 
     @staticmethod
@@ -357,18 +357,9 @@ class AudioLoop:
         self._last_issue_notify_time = now
         print(f"[Gemini ALERT] {message}")
         Logger.log_interaction_result(f"エラー通知: {message}")
-        if self.yolo_detector:
-            try:
-                self.yolo_detector.set_voicevox_message(message)
-            except Exception:
-                pass
 
     def _clear_runtime_issue(self):
-        if self.yolo_detector:
-            try:
-                self.yolo_detector.set_voicevox_message("")
-            except Exception:
-                pass
+        pass
 
     def _play_first_wav(self):
         import wave
@@ -1367,7 +1358,7 @@ class AudioLoop:
 
                 try:
                     # 連続失敗回数チェック
-                    if self.consecutive_connection_failures >= self.max_consecutive_failures:
+                    if self.max_consecutive_failures > 0 and self.consecutive_connection_failures >= self.max_consecutive_failures:
                         error_msg = f"連続{self.consecutive_connection_failures}回の接続失敗。セッションをリセットします。"
                         Logger.log_system_error("Gemini 接続失敗上限", message=error_msg)
                         print(f"[Gemini Error] {error_msg}")
@@ -1464,25 +1455,6 @@ class AudioLoop:
                                 f"error={type(e).__name__}: {e}"
                             ),
                         )
-                        if self.session_active.is_set():
-                            # 連続失敗が多い場合は完全にリセット
-                            if self.consecutive_connection_failures >= 3: # 5から3に変更
-                                print(f"[Gemini] Too many consecutive failures ({self.consecutive_connection_failures}). Resetting session.")
-                                Logger.log_system_error(
-                                    "Gemini connection failure limit",
-                                    e,
-                                    message=f"consecutive_failures={self.consecutive_connection_failures}, forcing reset"
-                                )
-                                await self._shutdown_session(
-                                    "forced reset after transient errors",
-                                    mark_failed=True,
-                                    mark_reset=False,
-                                )
-                                self.retry_pending = False
-                                self.retry_pending_until = 0.0
-                                await asyncio.sleep(1)
-                                continue
-
                         await self._shutdown_session(
                             "transient connection error",
                             mark_failed=True,
