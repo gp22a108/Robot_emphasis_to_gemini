@@ -235,6 +235,7 @@ class AudioLoop:
         self.retry_pending = False
         self.retry_pending_until = 0.0
         self._last_issue_notify_time = 0.0
+        self._proxy_summary = "mode=unknown; http=None; https=None"
         
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
@@ -1221,6 +1222,11 @@ class AudioLoop:
                 f"https={self._mask_proxy_value(os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy'))}"
             ),
         )
+        self._proxy_summary = (
+            f"mode={proxy_mode}; "
+            f"http={self._mask_proxy_value(os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy'))}; "
+            f"https={self._mask_proxy_value(os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy'))}"
+        )
             
         # クライアント初期化
         client = genai.Client(http_options=http_options)
@@ -1518,9 +1524,12 @@ class AudioLoop:
                         )
                         self.retry_pending = True
                         self.retry_pending_until = time.time() + retry_without_detection_seconds
+                        short_error = f"{type(e).__name__}: {str(e)}"
+                        if len(short_error) > 160:
+                            short_error = short_error[:160] + "..."
                         self._notify_runtime_issue(
                             "Gemini接続エラーで再接続中です。"
-                            "プロキシ環境なら config.py の GEMINI_PROXY_MODE / HTTP_PROXY / HTTPS_PROXY を確認してください。"
+                            f"原因={short_error}; {self._proxy_summary}"
                         )
                         Logger.log_system_error(
                             "Gemini connection retry",
