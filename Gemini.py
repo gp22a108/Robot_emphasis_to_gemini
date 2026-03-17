@@ -230,6 +230,8 @@ class AudioLoop:
         self.playback_active = asyncio.Event()
         self._playback_count = 0
         self._session_shutdown_lock = asyncio.Lock()
+        self._detection_lock = asyncio.Lock()
+        self.session_starting = asyncio.Event()
         
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
@@ -317,6 +319,7 @@ class AudioLoop:
                 self.session_failed.set()
             self.session_ready.clear()
             self.session_active.clear()
+            self.session_starting.clear()
             self.detection_triggered = False
             self.mic_is_active.clear()
             self._playback_count = 0
@@ -375,90 +378,92 @@ class AudioLoop:
 
     async def _on_detected(self):
         """検出時の非同期処理"""
-        # 既にセッションがアクティブなら何もしない
-        if self.session_active.is_set():
-            return
+        async with self._detection_lock:
+            # 既にセッション開始処理中/アクティブなら何もしない
+            if self.session_active.is_set() or self.session_starting.is_set():
+                return
+            self.session_starting.set()
 
-        print("[Gemini] Person detected! Playing First_play.wav before session start...")
-        self.detection_triggered = True
-        self.session_ready.clear() # セッション準備完了フラグをリセット
-        self.session_failed.clear() # セッション開始失敗フラグをリセット
+            print("[Gemini] Person detected! Playing First_play.wav before session start...")
+            self.detection_triggered = True
+            self.session_ready.clear() # セッション準備完了フラグをリセット
+            self.session_failed.clear() # セッション開始失敗フラグをリセット
 
-        # ログ記録: Geminiへの通知
-        Logger.log_gemini_conversation("システム", "検知 (First_play.wav 再生)")
+            # ログ記録: Geminiへの通知
+            Logger.log_gemini_conversation("システム", "検知 (First_play.wav 再生)")
 
-        # 1. Play audio first (Blocking in thread)
-        # 再生開始をマーク
-        self._mark_playback_start()
-        try:
-            # asyncio.to_thread で実行することで、メインループをブロックせずに再生
-            await asyncio.to_thread(self._play_first_wav)
-        except Exception as e:
-            Logger.log_system_error("音声再生タスク", e)
-            print(f"[Gemini] 音声再生タスクでエラーが発生しました: {e}")
-        finally:
-            # 再生終了をマーク（成功・失敗に関わらず）
-            self._mark_playback_end()
-
-        # 2. 再生完了時点で人物がまだ見えているか確認
-        presence_window = float(getattr(config, "SESSION_START_PRESENCE_WINDOW_SECONDS", 1.5))
-        if not self._person_visible_recently(presence_window):
-            print("[Gemini] Person no longer visible after intro playback. Skipping session start.")
-            Logger.log_system_event(
-                "INFO",
-                "Gemini lifecycle",
-                message="Session start skipped because person disappeared during intro playback",
-            )
-            await self._shutdown_session(
-                "person disappeared before session start",
-                reset_detection=True,
-                mark_reset=False,
-            )
-            return
-
-        # 3. Start Session Connection
-        print("[Gemini] Triggering session start after intro playback...")
-        self.session_active.set()
-
-        # 4. Wait for session to be ready
-        print("[Gemini] Waiting for session to be ready...")
-        connect_timeout = float(getattr(config, "SESSION_CONNECT_TIMEOUT_SECONDS", 30))
-        ready_task = asyncio.create_task(self.session_ready.wait())
-        failed_task = asyncio.create_task(self.session_failed.wait())
-        done, pending = await asyncio.wait(
-            [ready_task, failed_task],
-            timeout=connect_timeout,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        for task in pending:
+            # 1. Play audio first (Blocking in thread)
+            # 再生開始をマーク
+            self._mark_playback_start()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        if not done:
-            print("[Gemini] Session ready wait timed out. Resetting session...")
-            Logger.log_system_error("Gemini session ready timeout", message="Session ready wait timed out")
-            await self._shutdown_session(
-                "session ready wait timed out",
-                reset_detection=True,
-                mark_failed=True,
-                mark_reset=False,
-            )
-            return
+                # asyncio.to_thread で実行することで、メインループをブロックせずに再生
+                await asyncio.to_thread(self._play_first_wav)
+            except Exception as e:
+                Logger.log_system_error("音声再生タスク", e)
+                print(f"[Gemini] 音声再生タスクでエラーが発生しました: {e}")
+            finally:
+                # 再生終了をマーク（成功・失敗に関わらず）
+                self._mark_playback_end()
 
-        if self.session_failed.is_set() or not self.session_active.is_set():
-            print("[Gemini] Session failed to start. Keeping mic muted.")
-            await self._shutdown_session(
-                "session failed before ready",
-                reset_detection=True,
-                mark_reset=False,
-            )
-            return
+            # 2. 再生完了時点で人物がまだ見えているか確認
+            presence_window = float(getattr(config, "SESSION_START_PRESENCE_WINDOW_SECONDS", 1.5))
+            if not self._person_visible_recently(presence_window):
+                print("[Gemini] Person no longer visible after intro playback. Skipping session start.")
+                Logger.log_system_event(
+                    "INFO",
+                    "Gemini lifecycle",
+                    message="Session start skipped because person disappeared during intro playback",
+                )
+                await self._shutdown_session(
+                    "person disappeared before session start",
+                    reset_detection=True,
+                    mark_reset=False,
+                )
+                return
 
-        print("[Gemini] Session ready. Unmuting microphone.")
-        self.mic_is_active.set()
+            # 3. Start Session Connection
+            print("[Gemini] Triggering session start after intro playback...")
+            self.session_active.set()
+
+            # 4. Wait for session to be ready
+            print("[Gemini] Waiting for session to be ready...")
+            connect_timeout = float(getattr(config, "SESSION_CONNECT_TIMEOUT_SECONDS", 30))
+            ready_task = asyncio.create_task(self.session_ready.wait())
+            failed_task = asyncio.create_task(self.session_failed.wait())
+            done, pending = await asyncio.wait(
+                [ready_task, failed_task],
+                timeout=connect_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if not done:
+                print("[Gemini] Session ready wait timed out. Resetting session...")
+                Logger.log_system_error("Gemini session ready timeout", message="Session ready wait timed out")
+                await self._shutdown_session(
+                    "session ready wait timed out",
+                    reset_detection=True,
+                    mark_failed=True,
+                    mark_reset=False,
+                )
+                return
+
+            if self.session_failed.is_set() or not self.session_active.is_set():
+                print("[Gemini] Session failed to start. Keeping mic muted.")
+                await self._shutdown_session(
+                    "session failed before ready",
+                    reset_detection=True,
+                    mark_reset=False,
+                )
+                return
+
+            print("[Gemini] Session ready. Unmuting microphone.")
+            self.mic_is_active.set()
 
     def _handle_yolo_detection(self):
         """YOLO からの検出イベントを処理"""
