@@ -232,6 +232,7 @@ class AudioLoop:
         self._session_shutdown_lock = asyncio.Lock()
         self._detection_lock = asyncio.Lock()
         self.session_starting = asyncio.Event()
+        self.retry_pending = False
         
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
@@ -1262,19 +1263,32 @@ class AudioLoop:
                 Logger.log_system_event("INFO", "Gemini session loop",
                     message=f"Loop iteration #{session_loop_count}, consecutive_failures={self.consecutive_connection_failures}")
 
-                # セッション開始待機 (常に新規セッション)
-                print("[Gemini] Waiting for person detection to start NEW session...")
-                Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
-                await self._shutdown_session(
-                    "prepare for next detection",
-                    reset_detection=False,
-                    mark_reset=False,
-                )
-                self.session_active.clear()
-                self.session_failed.clear()
-                self._reset_detection_state()
-                await self._wait_for_detection()
-                Logger.log_system_event("INFO", "Gemini lifecycle", message="Person detected, starting session")
+                retry_presence_window = float(getattr(config, "RETRY_SESSION_PRESENCE_WINDOW_SECONDS", 5))
+                if self.retry_pending and self._person_visible_recently(retry_presence_window):
+                    print("[Gemini] Retrying session connection without replay (person still present).")
+                    Logger.log_system_event(
+                        "INFO",
+                        "Gemini lifecycle",
+                        message="Retrying session connection without new detection",
+                    )
+                    self.retry_pending = False
+                    self.session_active.set()
+                    self.session_failed.clear()
+                else:
+                    self.retry_pending = False
+                    # セッション開始待機 (常に新規セッション)
+                    print("[Gemini] Waiting for person detection to start NEW session...")
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Waiting for person detection")
+                    await self._shutdown_session(
+                        "prepare for next detection",
+                        reset_detection=False,
+                        mark_reset=False,
+                    )
+                    self.session_active.clear()
+                    self.session_failed.clear()
+                    self._reset_detection_state()
+                    await self._wait_for_detection()
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Person detected, starting session")
 
                 try:
                     # 連続失敗回数チェック
@@ -1333,6 +1347,7 @@ class AudioLoop:
                     print(f"[Gemini] Caught SessionResetException: {e}")
                     print("[Gemini] Session ended. Returning to detection wait state.")
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Session reset exception caught, returning to detection wait")
+                    self.retry_pending = False
                     await self._shutdown_session("session reset exception", reset_detection=False)
                     print("[Gemini] Calling _reset_detection_state...")
                     # YOLOの通知フラグをリセット（次の人物検出を可能にする）
@@ -1346,6 +1361,7 @@ class AudioLoop:
                         print(f"[Gemini] Detected reset exception in ExceptionGroup: {type(e).__name__}")
                         print("[Gemini] Session ended. Returning to detection wait state.")
                         Logger.log_system_event("INFO", "Gemini lifecycle", message=f"Reset exception in group ({type(e).__name__}), returning to detection wait")
+                        self.retry_pending = False
                         await self._shutdown_session("session reset exception group", reset_detection=False)
                         print("[Gemini] Calling _reset_detection_state...")
                         # YOLOの通知フラグをリセット（次の人物検出を可能にする）
@@ -1392,6 +1408,7 @@ class AudioLoop:
                             mark_failed=True,
                             mark_reset=False,
                         )
+                        self.retry_pending = True
                         Logger.log_system_error(
                             "Gemini connection retry",
                             e,

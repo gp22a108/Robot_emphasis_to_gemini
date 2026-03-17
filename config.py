@@ -36,6 +36,8 @@ SESSION_TIMEOUT_SECONDS = 5
 SESSION_CONNECT_TIMEOUT_SECONDS = 30
 # Intro音声再生後、この秒数以内に人物が見えていればセッション開始
 SESSION_START_PRESENCE_WINDOW_SECONDS = 1.5
+# 接続エラー時に再検知なしで再接続を試す人物在席猶予
+RETRY_SESSION_PRESENCE_WINDOW_SECONDS = 5
 # セッション終了時のクローズ待機タイムアウト
 SESSION_CLOSE_TIMEOUT_SECONDS = 3
 # 最大セッション継続時間 (秒)。0で無効
