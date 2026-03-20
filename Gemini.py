@@ -51,6 +51,9 @@ mss = None
 class SessionResetException(Exception):
     pass
 
+class SessionResumeException(Exception):
+    pass
+
 # 定数定義
 FORMAT = 8 # pyaudio.paInt16 (値は8)
 CHANNELS = 1
@@ -239,6 +242,8 @@ class AudioLoop:
         self.session_started_at = 0.0
         self.last_session_activity_at = 0.0
         self.exit_requested = False
+        
+        self.session_new_handle = None
         
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
@@ -829,12 +834,12 @@ class AudioLoop:
                 continue
             message = (
                 f"No Gemini session activity for {inactive_for:.1f}s "
-                f"(threshold={watchdog_timeout:.1f}s). Forcing reset."
+                f"(threshold={watchdog_timeout:.1f}s). Forcing resume."
             )
             print(f"[Gemini] {message}")
             Logger.log_system_error("Gemini session stall", message=message)
-            await self._shutdown_session("session stall watchdog timeout", mark_failed=True)
-            raise SessionResetException()
+            await self._shutdown_session("session stall watchdog timeout", mark_failed=True, mark_reset=False)
+            raise SessionResumeException()
 
     async def receive_responses(self):
         """Live API からのレスポンスを受信し、テキストを組み立てて処理"""
@@ -938,32 +943,48 @@ class AudioLoop:
                                 "Gemini response timeout",
                                 message=f"No response packet for {response_timeout:.1f}s",
                             )
-                            print(f"[Gemini] Response packet timeout ({response_timeout:.1f}s). Forcing session reset.")
-                            raise SessionResetException()
+                            print(f"[Gemini] Response packet timeout ({response_timeout:.1f}s). Forcing session resume.")
+                            raise SessionResumeException()
                         except Exception as e:
                             if ConnectionClosedOK and isinstance(e, ConnectionClosedOK):
                                 self.reset_trigger = True
                                 next_packet_task = None
-                                raise SessionResetException() from e
+                                print("[Gemini] ConnectionClosedOK received. Forcing session resume.")
+                                raise SessionResumeException() from e
                             Logger.log_system_error("Gemini ストリーム受信", e)
-                            print(f"[Gemini] パケット受信エラー: {e}")
+                            print(f"[Gemini] パケット受信エラー: {e} - Forcing session resume.")
                             next_packet_task = None
-                            break
+                            self.reset_trigger = True
+                            raise SessionResumeException() from e
 
                         next_packet_task = None # 処理完了
                         self._touch_session_activity()
+                        
+                        # Session Resumption handle の保存
+                        session_resumption_update = getattr(response, "session_resumption_update", None)
+                        if not session_resumption_update:
+                            session_resumption_update = self._get_field(response, "session_resumption_update")
+                            
+                        if session_resumption_update:
+                            new_handle = getattr(session_resumption_update, "new_handle", None)
+                            if not new_handle:
+                                new_handle = self._get_field(session_resumption_update, "new_handle")
+                                
+                            if new_handle:
+                                self.session_new_handle = new_handle
+                                print(f"[Gemini] Saved session resumption handle: {new_handle}")
 
                         go_away = self._get_field(response, "go_away")
                         if go_away:
                             time_left = self._get_field(go_away, "time_left")
                             if time_left is None:
-                                print("[Gemini] GoAway received. Closing session completely.")
-                                Logger.log_interaction_result("GoAway received - Session terminated")
+                                print("[Gemini] GoAway received. Forcing session resume.")
+                                Logger.log_interaction_result("GoAway received - Session resuming")
                             else:
-                                print(f"[Gemini] GoAway received (time_left={time_left}). Closing session completely.")
-                                Logger.log_interaction_result(f"GoAway received (time_left={time_left}) - Session terminated")
+                                print(f"[Gemini] GoAway received (time_left={time_left}). Forcing session resume.")
+                                Logger.log_interaction_result(f"GoAway received (time_left={time_left}) - Session resuming")
                             self.reset_trigger = True
-                            raise SessionResetException()
+                            raise SessionResumeException()
 
                         # --- 以下、既存のレスポンス処理ロジック ---
                         text = None
@@ -1358,6 +1379,7 @@ class AudioLoop:
                 "output_audio_transcription": {},
                 "input_audio_transcription": {},
                 "system_instruction": self.system_instruction,
+                "context_window_compression": {},
             }
 
             # VADあり設定
@@ -1388,9 +1410,11 @@ class AudioLoop:
                 self.reset_trigger = False
                 self.detection_triggered = False
                 
-                # セッション再開設定を無効化（常に新規セッション）
-                if "session_resumption" in live_config:
-                    del live_config["session_resumption"]
+                if getattr(self, "session_new_handle", None):
+                    live_config["session_resumption"] = {"handle": self.session_new_handle}
+                else:
+                    if "session_resumption" in live_config:
+                        del live_config["session_resumption"]
                 
                 try:
                     async with (
@@ -1425,8 +1449,17 @@ class AudioLoop:
             def is_reset_exception(e):
                 if isinstance(e, SessionResetException):
                     return True
+                if isinstance(e, SessionResumeException):
+                    return False
                 if isinstance(e, ExceptionGroup):
                     return any(is_reset_exception(ex) for ex in e.exceptions)
+                return False
+
+            def is_resume_exception(e):
+                if isinstance(e, SessionResumeException):
+                    return True
+                if isinstance(e, ExceptionGroup):
+                    return any(is_resume_exception(ex) for ex in e.exceptions)
                 return False
 
             def is_transient_connect_error(e):
@@ -1543,7 +1576,7 @@ class AudioLoop:
                             print("[Gemini] Connecting with VAD settings...")
                             await start_session(config_with_vad.copy())
                         except Exception as e:
-                            if is_reset_exception(e):
+                            if is_reset_exception(e) or is_resume_exception(e):
                                 raise
 
                             # ValidationError かどうかを判定 (型名やメッセージで)
@@ -1568,6 +1601,7 @@ class AudioLoop:
                     Logger.log_system_event("INFO", "Gemini lifecycle", message="Session reset exception caught, returning to detection wait")
                     self.retry_pending = False
                     self.retry_pending_until = 0.0
+                    self.session_new_handle = None
                     await self._shutdown_session("session reset exception", reset_detection=False)
                     print("[Gemini] Calling _reset_detection_state...")
                     # YOLOの通知フラグをリセット（次の人物検出を可能にする）
@@ -1576,6 +1610,15 @@ class AudioLoop:
                     await asyncio.sleep(1)
                     print("[Gemini] Sleep complete. Continuing to next iteration...")
                     continue
+                except SessionResumeException as e:
+                    print(f"[Gemini] Caught SessionResumeException: {e}")
+                    Logger.log_system_event("INFO", "Gemini lifecycle", message="Session resume exception caught, attempting reconnection")
+                    self.retry_pending = True
+                    self.retry_pending_until = time.time() + retry_without_detection_seconds
+                    retry_delay = float(getattr(config, "CONNECT_RETRY_WAIT_SECONDS", 1.0))
+                    await self._shutdown_session("session resume exception", reset_detection=False, mark_reset=False)
+                    await asyncio.sleep(retry_delay)
+                    continue
                 except Exception as e:
                     if is_reset_exception(e):
                         print(f"[Gemini] Detected reset exception in ExceptionGroup: {type(e).__name__}")
@@ -1583,6 +1626,7 @@ class AudioLoop:
                         Logger.log_system_event("INFO", "Gemini lifecycle", message=f"Reset exception in group ({type(e).__name__}), returning to detection wait")
                         self.retry_pending = False
                         self.retry_pending_until = 0.0
+                        self.session_new_handle = None
                         await self._shutdown_session("session reset exception group", reset_detection=False)
                         print("[Gemini] Calling _reset_detection_state...")
                         # YOLOの通知フラグをリセット（次の人物検出を可能にする）
@@ -1590,6 +1634,16 @@ class AudioLoop:
                         print("[Gemini] _reset_detection_state completed. Sleeping 1s...")
                         await asyncio.sleep(1)
                         print("[Gemini] Sleep complete. Continuing to next iteration...")
+                        continue
+                        
+                    if is_resume_exception(e):
+                        print(f"[Gemini] Detected resume exception in ExceptionGroup: {type(e).__name__}")
+                        Logger.log_system_event("INFO", "Gemini lifecycle", message=f"Resume exception in group ({type(e).__name__}), attempting reconnection")
+                        self.retry_pending = True
+                        self.retry_pending_until = time.time() + retry_without_detection_seconds
+                        retry_delay = float(getattr(config, "CONNECT_RETRY_WAIT_SECONDS", 1.0))
+                        await self._shutdown_session("session resume exception group", reset_detection=False, mark_reset=False)
+                        await asyncio.sleep(retry_delay)
                         continue
 
                     if is_transient_connect_error(e):
