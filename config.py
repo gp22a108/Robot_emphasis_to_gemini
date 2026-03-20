@@ -66,6 +66,10 @@ SESSION_RESUMPTION_RETRY_WAIT_SECONDS = 0.5
 END_TALK_COOLDOWN_SECONDS = 5
 # ユーザー発話後、Geminiからの応答を待つ最大時間 (秒)
 RESPONSE_TIMEOUT_SECONDS = 20
+# Gemini.py が予期せず run ループを抜けた場合に自動再起動する
+AUTO_RESTART_ON_EXIT = True
+# 自動再起動までの待機時間 (秒)
+PROCESS_RESTART_DELAY_SECONDS = 3
 
 # --- クラス定義 ---
 CLASSES = {

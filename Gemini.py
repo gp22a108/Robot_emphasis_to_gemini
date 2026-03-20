@@ -236,11 +236,20 @@ class AudioLoop:
         self.retry_pending_until = 0.0
         self._last_issue_notify_time = 0.0
         self._proxy_summary = "mode=unknown; http=None; https=None"
+        self.session_started_at = 0.0
+        self.last_session_activity_at = 0.0
+        self.exit_requested = False
         
         # 再接続制限とバックオフ
         self.consecutive_connection_failures = 0
         self.max_consecutive_failures = int(getattr(config, "MAX_CONSECUTIVE_CONNECT_FAILURES", 0) or 0)
         self.last_connection_attempt_time = 0.0
+
+    def _touch_session_activity(self):
+        now = time.time()
+        self.last_session_activity_at = now
+        if self.session_started_at <= 0.0:
+            self.session_started_at = now
 
     @staticmethod
     def _get_field(obj, name):
@@ -296,17 +305,42 @@ class AudioLoop:
         self.session = None
         if not session:
             return
-        close_func = getattr(session, "close", None)
-        if not callable(close_func):
-            return
-        try:
-            close_timeout = float(getattr(config, "SESSION_CLOSE_TIMEOUT_SECONDS", 3))
-            result = close_func()
-            if asyncio.iscoroutine(result):
-                await asyncio.wait_for(result, timeout=close_timeout)
-        except Exception as e:
-            Logger.log_system_error("Gemini close session", e, message=f"reason={reason}")
-            print(f"[Gemini Warning] Failed to close live session ({reason}): {e}")
+        close_timeout = float(getattr(config, "SESSION_CLOSE_TIMEOUT_SECONDS", 3))
+
+        for method_name in ("close", "aclose"):
+            close_func = getattr(session, method_name, None)
+            if not callable(close_func):
+                continue
+            try:
+                result = close_func()
+                if asyncio.iscoroutine(result):
+                    await asyncio.wait_for(result, timeout=close_timeout)
+            except Exception as e:
+                Logger.log_system_error(
+                    "Gemini close session",
+                    e,
+                    message=f"reason={reason}, method={method_name}",
+                )
+                print(f"[Gemini Warning] Failed to close live session ({reason}, {method_name}): {e}")
+
+        # SDK内部のWebSocketが残っているケースに備えて best-effort close
+        for attr_name in ("_ws", "ws", "_websocket"):
+            ws = getattr(session, attr_name, None)
+            if not ws:
+                continue
+            ws_close = getattr(ws, "close", None)
+            if not callable(ws_close):
+                continue
+            try:
+                result = ws_close()
+                if asyncio.iscoroutine(result):
+                    await asyncio.wait_for(result, timeout=close_timeout)
+            except Exception as e:
+                Logger.log_system_error(
+                    "Gemini websocket close",
+                    e,
+                    message=f"reason={reason}, attr={attr_name}",
+                )
 
     async def _shutdown_session(
         self,
@@ -328,6 +362,8 @@ class AudioLoop:
             self.mic_is_active.clear()
             self._playback_count = 0
             self.playback_active.clear()
+            self.session_started_at = 0.0
+            self.last_session_activity_at = 0.0
             await self._close_audio_stream()
             await self._close_live_session(reason)
             self.out_queue = None
@@ -597,6 +633,7 @@ class AudioLoop:
                 print(f"[Gemini] Input decode error: {e}. Skipping...")
                 continue
             if text.lower() == "q":
+                self.exit_requested = True
                 break
             
             # ログ記録: ユーザー入力
@@ -645,8 +682,10 @@ class AudioLoop:
 
             if kind == "audio":
                 await self.session.send_realtime_input(audio=payload)
+                self._touch_session_activity()
             elif kind == "video":
                 await self.session.send_realtime_input(video=payload)
+                self._touch_session_activity()
 
     async def listen_audio(self):
         """マイクから音声を取得して out_queue に投入"""
@@ -774,6 +813,29 @@ class AudioLoop:
                     print("[Gemini] monitor_timeout: Raising SessionResetException...")
                     raise SessionResetException()
 
+    async def monitor_session_stall(self):
+        """セッション通信が無音・無応答で停止した場合に強制リセットする。"""
+        response_timeout = float(getattr(config, "RESPONSE_TIMEOUT_SECONDS", 20) or 20)
+        watchdog_timeout = max(3.0, response_timeout)
+        while True:
+            await asyncio.sleep(1.0)
+            if not self.session_active.is_set():
+                continue
+            last = max(self.last_session_activity_at, self.session_started_at)
+            if last <= 0.0:
+                continue
+            inactive_for = time.time() - last
+            if inactive_for <= watchdog_timeout:
+                continue
+            message = (
+                f"No Gemini session activity for {inactive_for:.1f}s "
+                f"(threshold={watchdog_timeout:.1f}s). Forcing reset."
+            )
+            print(f"[Gemini] {message}")
+            Logger.log_system_error("Gemini session stall", message=message)
+            await self._shutdown_session("session stall watchdog timeout", mark_failed=True)
+            raise SessionResetException()
+
     async def receive_responses(self):
         """Live API からのレスポンスを受信し、テキストを組み立てて処理"""
         from Voicevox_player import VoicevoxStreamPlayer  # 遅延インポート
@@ -861,10 +923,23 @@ class AudioLoop:
                         # 次のパケットを待つタスク
                         next_packet_task = asyncio.create_task(turn_iter.__anext__())
                         try:
-                            response = await next_packet_task
+                            response_timeout = float(getattr(config, "RESPONSE_TIMEOUT_SECONDS", 20) or 20)
+                            if response_timeout > 0:
+                                response = await asyncio.wait_for(next_packet_task, timeout=response_timeout)
+                            else:
+                                response = await next_packet_task
                         except StopAsyncIteration:
                             next_packet_task = None
                             break # ストリーム終了
+                        except asyncio.TimeoutError:
+                            self.reset_trigger = True
+                            next_packet_task = None
+                            Logger.log_system_error(
+                                "Gemini response timeout",
+                                message=f"No response packet for {response_timeout:.1f}s",
+                            )
+                            print(f"[Gemini] Response packet timeout ({response_timeout:.1f}s). Forcing session reset.")
+                            raise SessionResetException()
                         except Exception as e:
                             if ConnectionClosedOK and isinstance(e, ConnectionClosedOK):
                                 self.reset_trigger = True
@@ -874,8 +949,9 @@ class AudioLoop:
                             print(f"[Gemini] パケット受信エラー: {e}")
                             next_packet_task = None
                             break
-                        
+
                         next_packet_task = None # 処理完了
+                        self._touch_session_activity()
 
                         go_away = self._get_field(response, "go_away")
                         if go_away:
@@ -1003,6 +1079,12 @@ class AudioLoop:
                             
                             if "[End_Talk]" in text:
                                 end_talk_detected = True
+                                Logger.log_system_event(
+                                    "INFO",
+                                    "Gemini lifecycle",
+                                    message="End_Talk detected. Ignoring trailing content and terminating session.",
+                                )
+                                break
                         
                         if not config.USE_VOICEVOX and audio_out_stream and audio_data:
                             await asyncio.to_thread(audio_out_stream.write, audio_data)
@@ -1075,7 +1157,12 @@ class AudioLoop:
                                     + cooldown_seconds
                                     - config.DETECTION_INTERVAL
                                 )
-                            
+                            self.reset_trigger = True
+                            await self._shutdown_session(
+                                "end talk detected",
+                                reset_detection=True,
+                                mark_reset=False,
+                            )
                             raise SessionResetException()
 
                 finally:
@@ -1312,6 +1399,8 @@ class AudioLoop:
                     ):
                         self.session = session
                         self.out_queue = asyncio.Queue(maxsize=5)
+                        self.session_started_at = time.time()
+                        self.last_session_activity_at = self.session_started_at
 
                         # セッション接続完了を通知
                         self.session_ready.set()
@@ -1321,6 +1410,7 @@ class AudioLoop:
                         tg.create_task(self.send_realtime())
                         tg.create_task(self.listen_audio())
                         tg.create_task(self.monitor_timeout()) # タイムアウト監視タスクを追加
+                        tg.create_task(self.monitor_session_stall()) # 無通信ハング監視
                         if self.video_mode == "screen":
                             tg.create_task(self.get_screen())
                         tg.create_task(self.receive_responses())
@@ -1599,9 +1689,24 @@ if __name__ == "__main__":
     Logger.log_system_event("INFO", "Gemini プロセス起動", message=f"Starting with mode={args.mode}, PID={os.getpid()}")
     print(f"[Gemini] Process starting with PID {os.getpid()}")
 
-    main = AudioLoop(video_mode=args.mode)
-    try:
-        asyncio.run(main.run())
-    finally:
-        if main.yolo_detector:
-            main.yolo_detector.stop()
+    auto_restart = bool(getattr(config, "AUTO_RESTART_ON_EXIT", True))
+    restart_delay = max(0.0, float(getattr(config, "PROCESS_RESTART_DELAY_SECONDS", 3)))
+
+    while True:
+        main = AudioLoop(video_mode=args.mode)
+        try:
+            asyncio.run(main.run())
+        finally:
+            if main.yolo_detector:
+                main.yolo_detector.stop()
+
+        if main.exit_requested or not auto_restart:
+            break
+
+        Logger.log_system_event(
+            "WARNING",
+            "Gemini process supervisor",
+            message=f"Gemini loop exited unexpectedly. Restarting in {restart_delay:.1f}s",
+        )
+        print(f"[Gemini] Loop exited. Restarting in {restart_delay:.1f}s...")
+        time.sleep(restart_delay)
